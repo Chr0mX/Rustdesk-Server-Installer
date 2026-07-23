@@ -2,17 +2,25 @@
 #
 # install.sh - RustDesk Server installer (community fork)
 #
-# Installs hbbs (rendezvous/signal server) and hbbr (relay server) using
-# release assets published on this fork's own GitHub repository -
-# there is no dependency on github.com/rustdesk or rustdesk.com.
+# Installs a complete, self-hosted, fully open-source RustDesk stack -
+# no dependency on github.com/rustdesk, rustdesk.com, or any closed-
+# source RustDesk Server Pro binary:
+#
+#   - hbbs/hbbr/rustdesk-utils, from lejianwen/rustdesk-server (an
+#     AGPL-3.0 fork of the official rustdesk/rustdesk-server adding the
+#     WebSocket support the web client needs)
+#   - rustdesk-api, the open-source admin API/console backend (built
+#     from source; Go)
+#   - rustdesk-api-web, its frontend (built from source; Vue/Vite)
 #
 # What this script does:
 #   1. Detects CPU architecture and Linux distribution
 #   2. Installs required dependencies via the distro's package manager
-#   3. Resolves the latest release from the GitHub Releases API
-#      (falls back to repo-root files if no release exists)
-#   4. Downloads, verifies and installs hbbs/hbbr/rustdesk-utils
-#   5. Creates systemd services for hbbs and hbbr
+#      (including Go/Node.js toolchains if not already present, needed
+#      to build rustdesk-api/rustdesk-api-web from source)
+#   3. Downloads and installs hbbs/hbbr/rustdesk-utils
+#   4. Builds and installs rustdesk-api + rustdesk-api-web
+#   5. Creates systemd services for all of the above
 #   6. Optionally sets up Nginx + Certbot for a TLS-terminated domain
 #   7. Supports a fully non-interactive mode for scripted deployments
 #
@@ -21,18 +29,31 @@
 #
 # Options:
 #   -y, --non-interactive     Never prompt; use flags/env vars for input
-#       --user <name>         Run hbbs/hbbr as this unprivileged user
+#       --user <name>         Run all services as this unprivileged user
 #       --domain <fqdn>       Use a domain + Let's Encrypt TLS via Nginx
 #       --ip                  Use IP-only mode (no domain/TLS)
-#       --owner <owner>       Override the GitHub repo owner for assets
-#       --repo <repo>         Override the GitHub repo name for assets
-#       --branch <branch>     Override the branch used for repo-root fallback
+#       --skip-api            Only install hbbs/hbbr; skip rustdesk-api
+#                             and rustdesk-api-web (headless server,
+#                             matching the plain open-source project)
+#       --hbbs-owner <owner>  Override the hbbs/hbbr release source
+#       --hbbs-repo <repo>
+#       --api-owner <owner>   Override the rustdesk-api source
+#       --api-repo <repo>
+#       --api-branch <branch>
+#       --web-owner <owner>   Override the rustdesk-api-web source
+#       --web-repo <repo>
+#       --web-branch <branch>
+#       --owner <owner>       Override where THIS installer's own
+#       --repo <repo>         lib.sh is fetched from, if not run from a
+#       --branch <branch>     local clone (rarely needs changing)
 #       --no-certbot-snap     Use distro packages for Certbot instead of snap
 #   -h, --help                Show this help and exit
 #
 # All options can also be provided via environment variables:
-#   NONINTERACTIVE, RUSTDESK_USER, RUSTDESK_DOMAIN, GITHUB_OWNER,
-#   GITHUB_REPO, GITHUB_BRANCH, CERTBOT_USE_SNAP
+#   NONINTERACTIVE, RUSTDESK_USER, RUSTDESK_DOMAIN, SKIP_API,
+#   HBBS_OWNER, HBBS_REPO, API_OWNER, API_REPO, API_BRANCH,
+#   WEB_OWNER, WEB_REPO, WEB_BRANCH, GITHUB_OWNER, GITHUB_REPO,
+#   GITHUB_BRANCH, CERTBOT_USE_SNAP
 
 set -uo pipefail
 
@@ -44,9 +65,10 @@ RUSTDESK_DOMAIN="${RUSTDESK_DOMAIN:-}"
 RUSTDESK_USER="${RUSTDESK_USER:-}"
 FORCE_IP_MODE="false"
 CERTBOT_USE_SNAP="${CERTBOT_USE_SNAP:-true}"
+SKIP_API="${SKIP_API:-false}"
 
 print_usage() {
-    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//' | sed -n '2,30p'
+    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//' | sed -n '2,45p'
 }
 
 while [ $# -gt 0 ]; do
@@ -62,6 +84,33 @@ while [ $# -gt 0 ]; do
             ;;
         --ip)
             FORCE_IP_MODE="true"
+            ;;
+        --skip-api)
+            SKIP_API="true"
+            ;;
+        --hbbs-owner)
+            HBBS_OWNER="$2"; shift
+            ;;
+        --hbbs-repo)
+            HBBS_REPO="$2"; shift
+            ;;
+        --api-owner)
+            API_OWNER="$2"; shift
+            ;;
+        --api-repo)
+            API_REPO="$2"; shift
+            ;;
+        --api-branch)
+            API_BRANCH="$2"; shift
+            ;;
+        --web-owner)
+            WEB_OWNER="$2"; shift
+            ;;
+        --web-repo)
+            WEB_REPO="$2"; shift
+            ;;
+        --web-branch)
+            WEB_BRANCH="$2"; shift
             ;;
         --owner)
             GITHUB_OWNER="$2"; shift
@@ -89,7 +138,9 @@ while [ $# -gt 0 ]; do
 done
 
 export NONINTERACTIVE="${NONINTERACTIVE:-false}"
-export RUSTDESK_USER RUSTDESK_DOMAIN GITHUB_OWNER GITHUB_REPO GITHUB_BRANCH CERTBOT_USE_SNAP
+export RUSTDESK_USER RUSTDESK_DOMAIN CERTBOT_USE_SNAP SKIP_API
+export GITHUB_OWNER GITHUB_REPO GITHUB_BRANCH
+export HBBS_OWNER HBBS_REPO API_OWNER API_REPO API_BRANCH WEB_OWNER WEB_REPO WEB_BRANCH
 
 ##################################################################################################################
 # Bootstrap: minimal deps + source lib.sh from this fork's own repository
@@ -155,7 +206,9 @@ if [ "${DEBUG:-false}" = "true" ]; then
     info "OS: $OS / VER: $VER / UPSTREAM_ID: $UPSTREAM_ID"
     info "ARCH: $ARCH / ARCH_ALIAS: $ARCH_ALIAS"
     info "PKG_MANAGER: $PKG_MANAGER / FIREWALL: $FIREWALL"
-    info "GitHub source: ${GITHUB_OWNER}/${GITHUB_REPO}@${GITHUB_BRANCH}"
+    info "hbbs/hbbr source: ${HBBS_OWNER}/${HBBS_REPO}"
+    info "rustdesk-api source: ${API_OWNER}/${API_REPO}@${API_BRANCH}"
+    info "rustdesk-api-web source: ${WEB_OWNER}/${WEB_REPO}@${WEB_BRANCH}"
     exit 0
 fi
 
@@ -180,7 +233,7 @@ if [ ! -f /etc/needrestart/needrestart.conf ]; then
 fi
 
 ##################################################################################################################
-# Select the user hbbs/hbbr will run as
+# Select the user services will run as
 ##################################################################################################################
 
 if [ -z "$RUSTDESK_USER" ] && [ "$NONINTERACTIVE" != "true" ]; then
@@ -204,14 +257,7 @@ fi
 if [ -n "$RUSTDESK_USER" ] && ! id "$RUSTDESK_USER" &>/dev/null; then
     die "User '$RUSTDESK_USER' does not exist on this system."
 fi
-
-run_as_rustdesk_user() {
-    if [ -n "$RUSTDESK_USER" ]; then
-        sudo -u "$RUSTDESK_USER" "$@"
-    else
-        "$@"
-    fi
-}
+SERVICE_USER="${RUSTDESK_USER:-root}"
 
 ##################################################################################################################
 # Dependencies
@@ -228,6 +274,10 @@ if [ "$FIREWALL" = "none" ]; then
         install_linux_package ufw && detect_firewall
     fi
 fi
+if [ "$SKIP_API" != "true" ]; then
+    # gcc is required for CGO (rustdesk-api uses go-sqlite3).
+    install_linux_package gcc || die "A C compiler (gcc) is required to build rustdesk-api and could not be installed."
+fi
 
 ##################################################################################################################
 # Firewall: open the ports hbbs/hbbr need
@@ -237,56 +287,67 @@ fw_allow tcp 21115-21119
 fw_allow udp 21116
 
 ##################################################################################################################
-# Resolve latest release and download assets
+# hbbs/hbbr/rustdesk-utils
 ##################################################################################################################
 
-if gh_fetch_latest_release; then
-    RELEASE_TAG=$(gh_release_tag)
-    info "Latest release on ${GITHUB_OWNER}/${GITHUB_REPO}: $RELEASE_TAG"
+if gh_fetch_latest_release "$HBBS_OWNER" "$HBBS_REPO"; then
+    HBBS_RELEASE_TAG=$(gh_release_tag)
+    info "Latest hbbs/hbbr release on ${HBBS_OWNER}/${HBBS_REPO}: $HBBS_RELEASE_TAG"
 else
-    RELEASE_TAG=""
-    warn "No GitHub release found for ${GITHUB_OWNER}/${GITHUB_REPO}; falling back to repository-root assets on branch '${GITHUB_BRANCH}'."
+    die "Could not find any release on ${HBBS_OWNER}/${HBBS_REPO}. Check --hbbs-owner/--hbbs-repo, or your network connection."
 fi
 
-ASSET_NAME="rustdesk-server-linux-${ARCH_ALIAS}.tar.gz"
+ZIP_ARCH="$(zip_arch_alias)"
+[ -n "$ZIP_ARCH" ] || die "No hbbs/hbbr release asset naming known for architecture $ARCH."
+HBBS_ASSET_NAME="rustdesk-server-linux-${ZIP_ARCH}.zip"
 
 if [ ! -d "$RUSTDESK_INSTALL_DIR" ]; then
-    success "Installing RustDesk Server..."
+    success "Installing hbbs/hbbr..."
     mkdir -p "$RUSTDESK_INSTALL_DIR"
     [ -d "$RUSTDESK_INSTALL_DIR" ] || die "The installation folder $RUSTDESK_INSTALL_DIR could not be created."
 
-    WORKDIR=$(mktemp -d)
-    trap 'rm -rf "$WORKDIR"' EXIT
+    HBBS_WORKDIR=$(mktemp -d)
+    trap 'rm -rf "$HBBS_WORKDIR"' EXIT
 
-    if ! fetch_and_verify "$ASSET_NAME" "$WORKDIR/$ASSET_NAME"; then
-        die "Sorry, the installation package ($ASSET_NAME) failed to download or verify. Please try running the installer again."
+    if ! fetch_and_verify "$HBBS_OWNER" "$HBBS_REPO" "master" "$HBBS_ASSET_NAME" "$HBBS_WORKDIR/$HBBS_ASSET_NAME"; then
+        die "Sorry, the hbbs/hbbr package ($HBBS_ASSET_NAME) failed to download or verify. Please try running the installer again."
     fi
 
-    tar -xf "$WORKDIR/$ASSET_NAME" -C "$WORKDIR"
-    EXTRACTED_DIR="$WORKDIR/${ARCH_ALIAS}"
-    [ -d "$EXTRACTED_DIR" ] || die "Unexpected archive layout: expected directory '${ARCH_ALIAS}' inside $ASSET_NAME."
+    EXTRACTED_DIR="$HBBS_WORKDIR/extracted"
+    extract_archive "$HBBS_WORKDIR/$HBBS_ASSET_NAME" "$EXTRACTED_DIR"
 
-    mv "$EXTRACTED_DIR/static" "$RUSTDESK_INSTALL_DIR"/
-    mv "$EXTRACTED_DIR/hbbr" /usr/bin/
-    mv "$EXTRACTED_DIR/hbbs" /usr/bin/
-    mv "$EXTRACTED_DIR/rustdesk-utils" /usr/bin/
-    chmod +x /usr/bin/hbbr /usr/bin/hbbs /usr/bin/rustdesk-utils
+    HBBS_BIN=$(find_binary "$EXTRACTED_DIR" hbbs)
+    HBBR_BIN=$(find_binary "$EXTRACTED_DIR" hbbr)
+    UTILS_BIN=$(find_binary "$EXTRACTED_DIR" rustdesk-utils)
+    [ -n "$HBBS_BIN" ] || die "Could not find an hbbs binary inside $HBBS_ASSET_NAME - unexpected archive layout."
+    [ -n "$HBBR_BIN" ] || die "Could not find an hbbr binary inside $HBBS_ASSET_NAME - unexpected archive layout."
+
+    mv "$HBBS_BIN" /usr/bin/hbbs
+    mv "$HBBR_BIN" /usr/bin/hbbr
+    chmod +x /usr/bin/hbbs /usr/bin/hbbr
+    if [ -n "$UTILS_BIN" ]; then
+        mv "$UTILS_BIN" /usr/bin/rustdesk-utils
+        chmod +x /usr/bin/rustdesk-utils
+    else
+        warn "rustdesk-utils binary not found in $HBBS_ASSET_NAME; skipping (not required for hbbs/hbbr to run)."
+    fi
 
     if [ -n "$RUSTDESK_USER" ]; then
         chown -R "$RUSTDESK_USER":"$RUSTDESK_USER" "$RUSTDESK_INSTALL_DIR"
-        chown "$RUSTDESK_USER":"$RUSTDESK_USER" /usr/bin/hbbr /usr/bin/hbbs /usr/bin/rustdesk-utils
+        chown "$RUSTDESK_USER":"$RUSTDESK_USER" /usr/bin/hbbr /usr/bin/hbbs
+        [ -n "$UTILS_BIN" ] && chown "$RUSTDESK_USER":"$RUSTDESK_USER" /usr/bin/rustdesk-utils
     fi
 
-    [ -n "$RELEASE_TAG" ] && write_installed_version "$RELEASE_TAG"
+    write_installed_version hbbs "$HBBS_RELEASE_TAG"
 
-    rm -rf "$WORKDIR"
+    rm -rf "$HBBS_WORKDIR"
     trap - EXIT
 else
-    success "RustDesk server already installed in $RUSTDESK_INSTALL_DIR."
+    success "hbbs/hbbr already installed in $RUSTDESK_INSTALL_DIR."
 fi
 
 ##################################################################################################################
-# Log directory
+# Log directory (hbbs/hbbr)
 ##################################################################################################################
 
 if [ ! -d "$RUSTDESK_LOG_DIR" ]; then
@@ -296,14 +357,11 @@ if [ ! -d "$RUSTDESK_LOG_DIR" ]; then
 fi
 
 ##################################################################################################################
-# systemd services
+# systemd services (hbbs/hbbr)
 ##################################################################################################################
 
-SERVICE_USER="${RUSTDESK_USER:-root}"
-
 write_service_unit() {
-    local name="$1"
-    local bin="$2"
+    local name="$1" bin="$2" workdir="$3" logdir="$4"
     local unit_path="/etc/systemd/system/rustdesk-${name}.service"
     cat > "$unit_path" <<UNIT
 [Unit]
@@ -314,21 +372,21 @@ After=network.target
 Type=simple
 LimitNOFILE=1000000
 ExecStart=${bin}
-WorkingDirectory=${RUSTDESK_INSTALL_DIR}
+WorkingDirectory=${workdir}
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
 Restart=always
 RestartSec=10
-StandardOutput=append:${RUSTDESK_LOG_DIR}/${name}.log
-StandardError=append:${RUSTDESK_LOG_DIR}/${name}.error
+StandardOutput=append:${logdir}/${name}.log
+StandardError=append:${logdir}/${name}.error
 
 [Install]
 WantedBy=multi-user.target
 UNIT
 }
 
-[ -f /etc/systemd/system/rustdesk-hbbs.service ] || write_service_unit hbbs /usr/bin/hbbs
-[ -f /etc/systemd/system/rustdesk-hbbr.service ] || write_service_unit hbbr /usr/bin/hbbr
+[ -f /etc/systemd/system/rustdesk-hbbs.service ] || write_service_unit hbbs /usr/bin/hbbs "$RUSTDESK_INSTALL_DIR" "$RUSTDESK_LOG_DIR"
+[ -f /etc/systemd/system/rustdesk-hbbr.service ] || write_service_unit hbbr /usr/bin/hbbr "$RUSTDESK_INSTALL_DIR" "$RUSTDESK_LOG_DIR"
 
 systemctl daemon-reload
 enable_and_start_service rustdesk-hbbr.service
@@ -359,7 +417,8 @@ success "Public key path: $PUBKEYNAME"
 PUBLICKEY=$(cat "$PUBKEYNAME")
 
 ##################################################################################################################
-# IP vs Domain (TLS) setup
+# IP vs Domain (TLS) setup - decided now so rustdesk-api's api-server
+# config below can be set correctly on first boot.
 ##################################################################################################################
 
 if [ "$FORCE_IP_MODE" = "true" ]; then
@@ -460,41 +519,153 @@ NGINX_RUSTDESK_CONF
         if ! "$CERTBOT_BIN" --nginx --cert-name "${RUSTDESK_DOMAIN}" --key-type ecdsa --renew-by-default --no-eff-email --agree-tos --server https://acme-v02.api.letsencrypt.org/directory -d "${RUSTDESK_DOMAIN}"; then
             die "Sorry, the TLS certificate for $RUSTDESK_DOMAIN failed to generate. Please check that ports 80/443 are correctly forwarded and that the DNS record points to this server's IP, then try again."
         fi
+
+        API_SERVER_URL="https://${RUSTDESK_DOMAIN}"
         ;;
     "IP"|*)
         fw_allow tcp 21114
         fw_enable
+        API_SERVER_URL="http://${WANIP4}:21114"
         ;;
 esac
+
+##################################################################################################################
+# rustdesk-api + rustdesk-api-web (built from source)
+##################################################################################################################
+
+ADMIN_PASSWORD_LINE=""
+
+if [ "$SKIP_API" = "true" ]; then
+    info "--skip-api set: leaving hbbs/hbbr as a headless install with no admin console."
+else
+    ensure_go 23
+    ensure_node 18
+
+    API_WORKDIR=$(mktemp -d)
+    trap 'rm -rf "$API_WORKDIR"' EXIT
+
+    API_SHA=$(gh_branch_sha "$API_OWNER" "$API_REPO" "$API_BRANCH") || die "Could not resolve ${API_OWNER}/${API_REPO}@${API_BRANCH}."
+    WEB_SHA=$(gh_branch_sha "$WEB_OWNER" "$WEB_REPO" "$WEB_BRANCH") || die "Could not resolve ${WEB_OWNER}/${WEB_REPO}@${WEB_BRANCH}."
+
+    if [ ! -d "$RUSTDESK_API_INSTALL_DIR" ] || [ "$(read_installed_version api)" != "$API_SHA" ] || [ "$(read_installed_version web)" != "$WEB_SHA" ]; then
+        success "Building rustdesk-api (${API_OWNER}/${API_REPO}@${API_BRANCH})..."
+        fetch_source_tarball "$API_OWNER" "$API_REPO" "$API_BRANCH" "$API_WORKDIR/rustdesk-api" \
+            || die "Could not fetch rustdesk-api source from ${API_OWNER}/${API_REPO}@${API_BRANCH}."
+
+        (
+            cd "$API_WORKDIR/rustdesk-api" || exit 1
+            mkdir -p release
+            # go.sum as checked into the repo can be incomplete for a
+            # fresh module cache; `go mod tidy` fills in any gaps before
+            # the real build so it doesn't fail on missing sum entries.
+            go mod tidy
+            CGO_ENABLED=1 go build -o release/apimain ./cmd/apimain.go
+        ) || die "Building rustdesk-api failed."
+
+        success "Building rustdesk-api-web (${WEB_OWNER}/${WEB_REPO}@${WEB_BRANCH})..."
+        fetch_source_tarball "$WEB_OWNER" "$WEB_REPO" "$WEB_BRANCH" "$API_WORKDIR/rustdesk-api-web" \
+            || die "Could not fetch rustdesk-api-web source from ${WEB_OWNER}/${WEB_REPO}@${WEB_BRANCH}."
+
+        (
+            cd "$API_WORKDIR/rustdesk-api-web" || exit 1
+            npm install
+            npm run build
+        ) || die "Building rustdesk-api-web failed."
+
+        # Assemble the release layout rustdesk-api's own build.sh produces.
+        mkdir -p "$API_WORKDIR/rustdesk-api/release/resources/admin"
+        cp -ar "$API_WORKDIR/rustdesk-api-web/dist/." "$API_WORKDIR/rustdesk-api/release/resources/admin/"
+        cp -ar "$API_WORKDIR/rustdesk-api/docs" "$API_WORKDIR/rustdesk-api/release/" 2>/dev/null || true
+        mkdir -p "$API_WORKDIR/rustdesk-api/release/conf" "$API_WORKDIR/rustdesk-api/release/data" "$API_WORKDIR/rustdesk-api/release/runtime"
+        cp -n "$API_WORKDIR/rustdesk-api/conf/config.yaml" "$API_WORKDIR/rustdesk-api/release/conf/config.yaml" 2>/dev/null || true
+
+        # Install into place, preserving any existing conf/data across rebuilds.
+        mkdir -p "$RUSTDESK_API_INSTALL_DIR"
+        for d in resources conf data runtime; do
+            if [ -d "$RUSTDESK_API_INSTALL_DIR/$d" ] && [ "$d" != "resources" ]; then
+                continue # keep existing conf/data/runtime; only resources (built assets) is always refreshed
+            fi
+            rm -rf "${RUSTDESK_API_INSTALL_DIR:?}/$d"
+            cp -ar "$API_WORKDIR/rustdesk-api/release/$d" "$RUSTDESK_API_INSTALL_DIR/$d"
+        done
+        mv "$API_WORKDIR/rustdesk-api/release/apimain" /usr/bin/rustdesk-api
+        chmod +x /usr/bin/rustdesk-api
+
+        # Configure conf/config.yaml for this install.
+        CONFIG_FILE="$RUSTDESK_API_INSTALL_DIR/conf/config.yaml"
+        sed -i \
+            -e "s#^\(\s*id-server:\s*\).*#\1\"${WANIP4}:21116\"#" \
+            -e "s#^\(\s*relay-server:\s*\).*#\1\"${WANIP4}:21117\"#" \
+            -e "s#^\(\s*api-server:\s*\).*#\1\"${API_SERVER_URL}\"#" \
+            -e "s#^\(\s*key-file:\s*\).*#\1\"${RUSTDESK_INSTALL_DIR}/id_ed25519.pub\"#" \
+            "$CONFIG_FILE"
+
+        if [ -n "$RUSTDESK_USER" ]; then
+            chown -R "$RUSTDESK_USER":"$RUSTDESK_USER" "$RUSTDESK_API_INSTALL_DIR" /usr/bin/rustdesk-api
+        fi
+
+        write_installed_version api "$API_SHA"
+        write_installed_version web "$WEB_SHA"
+    else
+        success "rustdesk-api/rustdesk-api-web already built and up to date."
+    fi
+
+    rm -rf "$API_WORKDIR"
+    trap - EXIT
+
+    if [ ! -d "$RUSTDESK_API_LOG_DIR" ]; then
+        install -d -m 700 "$RUSTDESK_API_LOG_DIR"
+        [ -n "$RUSTDESK_USER" ] && chown -R "$RUSTDESK_USER":"$RUSTDESK_USER" "$RUSTDESK_API_LOG_DIR"
+    fi
+
+    [ -f /etc/systemd/system/rustdesk-api.service ] || write_service_unit api /usr/bin/rustdesk-api "$RUSTDESK_API_INSTALL_DIR" "$RUSTDESK_API_LOG_DIR"
+    systemctl daemon-reload
+    enable_and_start_service rustdesk-api.service
+
+    if ! wait_for_service_active rustdesk-api.service 60; then
+        die "rustdesk-api.service failed to become active. Check: journalctl -u rustdesk-api.service"
+    fi
+
+    # The randomly-generated admin password is only ever printed once,
+    # to this log, on the very first migration/startup.
+    sleep 2
+    ADMIN_PASSWORD_LINE=$(grep -h "Admin Password Is:" "$RUSTDESK_API_LOG_DIR"/*.log 2>/dev/null | tail -n1)
+fi
 
 ##################################################################################################################
 # Final output
 ##################################################################################################################
 
-if [ -n "$RUSTDESK_DOMAIN" ] && [ "$CHOICE" = "DNS" ]; then
-    msg_box "Installation complete!
+FINAL_MSG="Installation complete!
 
 Your Public Key is:
 $PUBLICKEY
+"
 
-Your DNS Address is:
-$RUSTDESK_DOMAIN
-
-Please login at https://$RUSTDESK_DOMAIN
-Default User/Pass: admin/test1234
-(change this immediately after first login)"
+if [ "$SKIP_API" = "true" ]; then
+    FINAL_MSG+="
+No admin console was installed (--skip-api). Point your RustDesk clients
+directly at this server's ID/relay server and the public key above."
+elif [ "$CHOICE" = "DNS" ]; then
+    FINAL_MSG+="
+Admin console: https://$RUSTDESK_DOMAIN
+"
 else
-    msg_box "Installation complete!
-
-Your Public Key is:
-$PUBLICKEY
-
-Your IP Address is:
-$WANIP4
-
-Please login at http://$WANIP4:21114
-Default User/Pass: admin/test1234
-(change this immediately after first login)"
+    FINAL_MSG+="
+Admin console: http://$WANIP4:21114
+"
 fi
 
+if [ -n "$ADMIN_PASSWORD_LINE" ]; then
+    FINAL_MSG+="
+$ADMIN_PASSWORD_LINE
+(This is shown once. Log in as 'admin' and change it immediately.)"
+elif [ "$SKIP_API" != "true" ]; then
+    FINAL_MSG+="
+(Admin was already initialized in a previous run; its password is not
+re-printed. Use the CLI to reset it: rustdesk-api reset-admin-pwd <pwd>,
+run from $RUSTDESK_API_INSTALL_DIR.)"
+fi
+
+msg_box "$FINAL_MSG"
 success "RustDesk Server installation finished."

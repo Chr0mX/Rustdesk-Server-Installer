@@ -159,7 +159,7 @@ if [ "$NONINTERACTIVE" != "true" ]; then
 $CHECKLIST_GUIDE
 
 $RUN_LATER_GUIDE" "$WT_HEIGHT" "$WT_WIDTH" 10 \
-"rustdesk-server" "(RustDesk SERVER + RustDesk services)" ON \
+"rustdesk-server" "(hbbs/hbbr + rustdesk-api services)" ON \
 "rustdesk-logs" "(RustDesk LOG dir)" OFF \
 "firewall-rules" "(RustDesk firewall rules)" ON \
 "nginx-rustdesk" "(RustDesk Nginx site config)" OFF \
@@ -236,6 +236,26 @@ if [ "$REMOVE_RUSTDESK_SERVER" = "yes" ]; then
         rm -rf "${RUSTDESK_INSTALL_DIR:?}/static"
         [ -d "$RUSTDESK_INSTALL_DIR" ] && info "Configuration and keys kept in $RUSTDESK_INSTALL_DIR (use --purge to remove them)."
     fi
+
+    if [ -f /etc/systemd/system/rustdesk-api.service ] || [ -d "$RUSTDESK_API_INSTALL_DIR" ]; then
+        info "Removing rustdesk-api..."
+        stop_and_disable_service rustdesk-api.service
+        rm -f /etc/systemd/system/rustdesk-api.service
+        systemctl daemon-reload
+        rm -f /usr/bin/rustdesk-api
+
+        if [ "$PURGE" = "true" ]; then
+            rm -rf "$RUSTDESK_API_INSTALL_DIR"
+        else
+            # Keep conf/ (admin credentials, OAuth settings) and data/
+            # (the user/device database) so a future install.sh run can
+            # pick the same install back up. Only the built frontend/
+            # backend assets are removed, since those are rebuilt fresh
+            # on every install anyway.
+            rm -rf "${RUSTDESK_API_INSTALL_DIR:?}/resources"
+            [ -d "$RUSTDESK_API_INSTALL_DIR" ] && info "Configuration and database kept in $RUSTDESK_API_INSTALL_DIR (use --purge to remove them)."
+        fi
+    fi
 fi
 
 ##################################################################################################################
@@ -244,6 +264,7 @@ fi
 
 if [ "$REMOVE_RUSTDESK_LOG" = "yes" ]; then
     rm -rf "$RUSTDESK_LOG_DIR"
+    rm -rf "$RUSTDESK_API_LOG_DIR"
 fi
 
 ##################################################################################################################

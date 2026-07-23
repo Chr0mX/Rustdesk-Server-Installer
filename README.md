@@ -1,46 +1,34 @@
 # RustDesk Server Installer (self-hosted fork)
 
-This repository is a self-contained installer for RustDesk Server
-(hbbs/hbbr/rustdesk-utils). It does **not** depend on
-`github.com/rustdesk`, `rustdesk.com`, or any official RustDesk release
-infrastructure — every script downloads its assets from **this**
-repository instead.
+This repository installs a complete, **fully open-source** self-hosted
+RustDesk stack. It does **not** depend on `github.com/rustdesk`,
+`rustdesk.com`, or any closed-source RustDesk Server Pro binary — every
+component comes from a genuinely open, freely-licensed project:
 
-> **No binary assets are shipped in this repository.** The RustDesk
-> Server Pro binaries (`.deb` packages and `.tar.gz` archive) that used
-> to sit at the repository root have been removed — they are
-> closed-source, license-gated software (a paid license validated
-> against `rustdesk.com` is required to run them; see
-> [Authentication model](#authentication-model) below) that this
-> repository has no rights to redistribute. Only the installer scripts
-> themselves live here now. To actually install anything, either:
-> - publish a GitHub Release on **your own copy** of these assets,
->   obtained through your own valid RustDesk Server Pro license, or
-> - point `GITHUB_OWNER`/`GITHUB_REPO`/`GITHUB_BRANCH` at wherever you
->   legitimately host the assets you're licensed to use.
->
-> `install.sh`/`update.sh` will fail with a clear error (not silently)
-> if no release and no repo-root asset can be found.
+| Component | Source | License |
+|---|---|---|
+| hbbs / hbbr / rustdesk-utils | [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server) (a fork of the official `rustdesk/rustdesk-server` adding WebSocket support, a connection-timeout fix, and optional `MUST_LOGIN` enforcement) | AGPL-3.0 |
+| rustdesk-api (admin API backend) | [Chr0mX/rustdesk-api](https://github.com/Chr0mX/rustdesk-api), a fork of [lejianwen/rustdesk-api](https://github.com/lejianwen/rustdesk-api) | MIT |
+| rustdesk-api-web (admin console frontend) | [Chr0mX/rustdesk-api-web](https://github.com/Chr0mX/rustdesk-api-web), a fork of [lejianwen/rustdesk-api-web](https://github.com/lejianwen/rustdesk-api-web) | MIT |
+
+Earlier versions of this repository vendored the closed-source RustDesk
+Server Pro binaries directly; those have been removed (see
+[MIGRATION.md](MIGRATION.md)) in favor of this fully open stack.
 
 ## What's in here
 
 | File               | Purpose                                                             |
 |--------------------|-----------------------------------------------------------------------|
-| `lib.sh`           | Shared library: logging, retries, GitHub API/asset resolution, download+checksum verification, arch/distro detection, package-manager and firewall abstraction, systemd helpers |
-| `install.sh`       | Fresh install: dependencies, hbbs/hbbr/rustdesk-utils, systemd services, optional Nginx+Certbot TLS |
-| `update.sh`        | Checks the latest release, upgrades in place, rolls back automatically if the upgraded services don't come up healthy |
+| `lib.sh`           | Shared library: logging, retries, GitHub API/asset resolution, download+checksum verification, arch/distro detection, package-manager and firewall abstraction, systemd helpers, Go/Node toolchain bootstrap |
+| `install.sh`       | Fresh install: hbbs/hbbr/rustdesk-utils + builds and installs rustdesk-api/rustdesk-api-web from source, systemd services, optional Nginx+Certbot TLS |
+| `update.sh`        | Checks for updates to each of the three components independently, upgrades whichever moved, rolls back automatically if the upgraded services don't come up healthy |
 | `uninstall.sh`     | Removes the install; supports `--purge` and a `--remove-dependencies` opt-in |
 | `convertfromos.sh` | Migrates a legacy RustDesk Server Open Source install (old `gohttpserver`/`rustdesksignal`/`rustdeskrelay` units) to this fork |
-
-Release assets (`rustdesk-server-linux-<arch>.tar.gz`, and the
-`.deb` packages) can live either at the repository root or as
-[GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github)
-assets — see [Repository layout](#repository-layout) below.
 
 ## Quick start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/Chr0mX/Rustdesk-Web/main/install.sh -o install.sh
 sudo bash install.sh
 ```
 
@@ -50,13 +38,20 @@ Non-interactive example (CI / scripted deployment):
 sudo bash install.sh --non-interactive --user rustdesk --domain rustdesk.example.com
 ```
 
-Update to the latest release:
+Headless install (hbbs/hbbr only, no admin console — matches the plain
+open-source project's own default):
+
+```bash
+sudo bash install.sh --non-interactive --skip-api
+```
+
+Update everything that's moved since the last run:
 
 ```bash
 sudo bash update.sh --non-interactive
 ```
 
-Uninstall, keeping keys/config for a future reinstall:
+Uninstall, keeping keys/config/database for a future reinstall:
 
 ```bash
 sudo bash uninstall.sh --non-interactive
@@ -68,42 +63,58 @@ Uninstall and wipe everything RustDesk-specific:
 sudo bash uninstall.sh --non-interactive --purge
 ```
 
-## Repository layout
+## How the three components fit together
 
-`lib.sh` resolves every asset in this order:
+- **hbbs/hbbr** do the actual rendezvous/NAT-traversal and relay work,
+  same as any RustDesk deployment. Installed from a prebuilt release
+  archive (`rustdesk-server-linux-<arch>.zip`).
+- **rustdesk-api** is the open-source admin API server — it's what
+  replaces RustDesk Server Pro's closed-source console. It has no
+  prebuilt release, so `install.sh`/`update.sh` build it from source
+  (Go, with CGO for its SQLite driver) on the target machine.
+- **rustdesk-api-web** is that console's frontend (Vue/Vite), also
+  built from source and copied into `rustdesk-api`'s `resources/admin`
+  directory, matching [rustdesk-api's own documented build
+  process](https://github.com/lejianwen/rustdesk-api/blob/master/README_EN.md#source-installation).
 
-1. **GitHub Releases (preferred).** If `GITHUB_OWNER/GITHUB_REPO` has a
-   published release, its assets are used (`rustdesk-server-linux-<arch>.tar.gz`,
-   `rustdesk-server-{hbbs,hbbr,utils}_<version>_<arch>.deb`, plus an
-   optional `<asset>.sha256` for integrity verification).
-2. **Repository root (fallback).** If there is no release, or the asset
-   isn't attached to it, the same file name is fetched from the root of
-   the `GITHUB_BRANCH` branch.
+`install.sh` installs Go and Node.js toolchains automatically if the
+distro's own packages are missing or too old (pinned fallback versions
+downloaded from go.dev/nodejs.org — see `ensure_go`/`ensure_node` in
+`lib.sh`).
 
-This means the installer keeps working with zero script changes whether
-you publish versioned GitHub Releases or simply keep files committed at
-the repository root — and it starts using a Release the moment you
-publish one. Neither location currently has any assets in this
-repository (see the notice at the top of this file) — you must supply
-your own before `install.sh`/`update.sh` can do anything.
+### Source vs. release assets
 
-Cutting a new release only requires:
+Because rustdesk-api/rustdesk-api-web are always built from a branch
+(no release binaries exist for these forks), their "installed version"
+is tracked by git commit SHA (`gh_branch_sha` in `lib.sh`), not a
+release tag — `update.sh` rebuilds them whenever the tracked branch has
+moved. hbbs/hbbr continue to use the GitHub Releases API + repo-root
+fallback pattern this fork has always used.
+
+## Overriding the sources
+
+Every component's GitHub source is independently configurable, as
+flags or environment variables:
 
 ```bash
-git tag v1.8.6
-git push origin v1.8.6
-gh release create v1.8.6 rustdesk-server-linux-amd64.tar.gz rustdesk-server-linux-arm64.tar.gz \
-    rustdesk-server-hbbs_1.8.6_amd64.deb rustdesk-server-hbbr_1.8.6_amd64.deb rustdesk-server-utils_1.8.6_amd64.deb
+sudo bash install.sh \
+  --hbbs-owner myorg --hbbs-repo my-rustdesk-server-fork \
+  --api-owner myorg --api-repo my-rustdesk-api-fork --api-branch main \
+  --web-owner myorg --web-repo my-rustdesk-api-web-fork --web-branch main
 ```
 
-`update.sh` will pick it up automatically on the next run.
+To use the plain official server instead of `lejianwen`'s fork (loses
+the web client, since the official server has no WebSocket support):
+
+```bash
+sudo bash install.sh --hbbs-owner rustdesk --hbbs-repo rustdesk-server
+```
 
 ## Private repositories
 
-If you keep this fork **private**, anonymous downloads of
-`raw.githubusercontent.com` files and release assets return 404. Export
-a token with `repo` (or fine-grained "Contents: Read") scope before
-running any script:
+If any of the source repositories above are private, anonymous
+downloads return 404. Export a token with `repo` (or fine-grained
+"Contents: Read") scope before running any script:
 
 ```bash
 export GITHUB_TOKEN=ghp_xxx
@@ -111,7 +122,7 @@ sudo -E bash install.sh --non-interactive
 ```
 
 `-E` is required so `sudo` preserves the environment variable. No token
-is needed once the repository is public.
+is needed for public repositories.
 
 ## Configuration reference
 
@@ -119,15 +130,26 @@ All flags are also available as environment variables:
 
 | Variable            | CLI flag        | Default                       | Meaning |
 |---------------------|-----------------|--------------------------------|---------|
-| `GITHUB_OWNER`       | `--owner`       | `Chr0mX`                       | Repo owner to pull assets from |
-| `GITHUB_REPO`        | `--repo`        | `Rustdesk-Web`                 | Repo name to pull assets from |
-| `GITHUB_BRANCH`      | `--branch`      | `main`                         | Branch used for the repo-root fallback |
+| `HBBS_OWNER`         | `--hbbs-owner`  | `lejianwen`                    | hbbs/hbbr release source |
+| `HBBS_REPO`          | `--hbbs-repo`   | `rustdesk-server`               | |
+| `API_OWNER`          | `--api-owner`   | `Chr0mX`                       | rustdesk-api source |
+| `API_REPO`           | `--api-repo`    | `rustdesk-api`                  | |
+| `API_BRANCH`         | `--api-branch`  | `master`                        | |
+| `WEB_OWNER`          | `--web-owner`   | `Chr0mX`                       | rustdesk-api-web source |
+| `WEB_REPO`           | `--web-repo`    | `rustdesk-api-web`              | |
+| `WEB_BRANCH`         | `--web-branch`  | `master`                        | |
+| `GITHUB_OWNER`       | `--owner`       | `Chr0mX`                       | Where this installer's own `lib.sh` is fetched from, if not run from a local clone |
+| `GITHUB_REPO`        | `--repo`        | `Rustdesk-Web`                 | |
+| `GITHUB_BRANCH`      | `--branch`      | `main`                         | |
 | `GITHUB_TOKEN`       | -               | (unset)                        | Auth token; required for private repos |
 | `NONINTERACTIVE`     | `-y`/`--non-interactive` | `false`                | Disable all whiptail prompts |
-| `RUSTDESK_USER`      | `--user`        | (unset, root)                  | Unprivileged user hbbs/hbbr run as |
+| `RUSTDESK_USER`      | `--user`        | (unset, root)                  | Unprivileged user all services run as |
 | `RUSTDESK_DOMAIN`    | `--domain`      | (unset, IP mode)                | Enables the Nginx+Certbot TLS flow |
-| `RUSTDESK_INSTALL_DIR` | -             | `/var/lib/rustdesk-server`      | Install/config/key directory |
-| `RUSTDESK_LOG_DIR`   | -               | `/var/log/rustdesk-server`      | Log directory |
+| `SKIP_API`           | `--skip-api`    | `false`                        | Headless install: hbbs/hbbr only, no admin console |
+| `RUSTDESK_INSTALL_DIR` | -             | `/var/lib/rustdesk-server`      | hbbs/hbbr install/config/key directory |
+| `RUSTDESK_LOG_DIR`   | -               | `/var/log/rustdesk-server`      | hbbs/hbbr log directory |
+| `RUSTDESK_API_INSTALL_DIR` | -        | `/var/lib/rustdesk-api`         | rustdesk-api install/config/database directory |
+| `RUSTDESK_API_LOG_DIR` | -             | `/var/log/rustdesk-api`         | rustdesk-api log directory |
 | `DEBUG`              | -               | `false`                        | Verbose logging + OS/arch report, then exit |
 | `DOWNLOAD_RETRIES`   | -               | `5`                            | Retry attempts for network operations |
 
@@ -137,38 +159,38 @@ the full flag list for each script.
 ## Architecture & distro support
 
 - **Architectures:** `amd64` (x86_64), `arm64` (aarch64), `armv7`. Adding a
-  new one is a single line in `detect_arch()` in `lib.sh`.
+  new one is a single line in `detect_arch()` in `lib.sh` (plus its
+  `zip_arch_alias`/`deb_arch_alias`/`go_arch_alias`/`node_arch_alias`
+  mappings, since hbbs/hbbr, Go and Node.js each use their own
+  per-arch naming convention).
 - **Distros:** any distro using apt, dnf, yum, zypper, pacman, apk or
   emerge is supported — this covers Ubuntu, Debian, Linux Mint, Pop!_OS,
   Rocky Linux, AlmaLinux, Fedora, CentOS, RHEL and openSUSE.
 - **Firewall:** `ufw` and `firewalld` are both handled automatically
   (`fw_allow`/`fw_delete`/`fw_enable` in `lib.sh`); distros with neither
   simply skip firewall configuration with a warning.
+- **Build toolchain:** a C compiler (`gcc`, for CGO/SQLite) plus Go
+  1.23+ and Node.js 18+ (auto-installed if missing/too old) are
+  required unless `--skip-api` is used.
 
 ## Authentication model
 
-RustDesk Server Pro's web console (served on port `21114`, or via
-Nginx+TLS when a domain is configured) ships with its own local admin
-account (`admin` / `test1234` by default) and manages users entirely
-inside its own local SQLite database under
-`/var/lib/rustdesk-server`. There is **no dependency on any external
-RustDesk cloud/auth service** — this was already true of the upstream
-binary and is preserved unchanged by this fork.
-
-This repository only contains the installer scripts, not the hbbs/hbbr
-Rust source, so there is no server-side auth code to modify. If you need
-custom auth logic, it must be implemented against the Pro server's own
-API/admin console (see its `/api` documentation once installed) rather
-than in these scripts. **Change the default admin password immediately
-after first login.**
+rustdesk-api's admin console manages users entirely in its own local
+database (SQLite by default) under `/var/lib/rustdesk-api/data` — there
+is **no dependency on any external RustDesk cloud/auth service**. A
+random admin password is generated on first startup and printed once to
+`/var/log/rustdesk-api/rustdesk-api.log`; `install.sh` captures and
+displays it at the end of the run. **Change it immediately after first
+login.** Optional GitHub/Google/OIDC/LDAP login can be configured
+afterward from the admin console itself.
 
 ## Rollback behavior
 
-`update.sh` backs up the currently installed `hbbs`, `hbbr`,
-`rustdesk-utils` and `static/` before touching anything. If the
-post-upgrade services don't reach an active state within 60 seconds, it
-automatically restores the backup and restarts the services, so a failed
-release never leaves the server down.
+`update.sh` backs up hbbs/hbbr binaries and the rustdesk-api
+binary+built frontend assets before touching anything, independently
+for each component. If the post-upgrade services don't reach an active
+state within 60 seconds, it automatically restores the backup and
+restarts the services, so a failed update never leaves the server down.
 
 See [`MIGRATION.md`](MIGRATION.md) for what changed from the original
 scripts and why.

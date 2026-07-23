@@ -15,13 +15,35 @@ true
 # Repository configuration
 ############################################################
 
-# The GitHub repository that hosts this fork's installer scripts and
-# release assets. Override with env vars if you maintain your own fork.
+# The GitHub repository that hosts this fork's installer scripts.
+# Override with env vars if you maintain your own fork.
 GITHUB_OWNER="${GITHUB_OWNER:-Chr0mX}"
 GITHUB_REPO="${GITHUB_REPO:-Rustdesk-Web}"
 GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB_RAW_HOST="${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}"
+
+# hbbs/hbbr binaries: lejianwen/rustdesk-server, an AGPL-3.0 fork of the
+# official rustdesk/rustdesk-server that adds the WebSocket support the
+# web client needs, a connection-timeout fix, and optional MUST_LOGIN
+# enforcement. Set HBBS_OWNER/HBBS_REPO to "rustdesk"/"rustdesk-server"
+# to use the plain official server instead (everything works except the
+# web client, which needs WebSocket support neither the official server
+# nor this fork's install path can add on its own).
+HBBS_OWNER="${HBBS_OWNER:-lejianwen}"
+HBBS_REPO="${HBBS_REPO:-rustdesk-server}"
+
+# rustdesk-api (Go backend) and rustdesk-api-web (Vue frontend): the
+# open-source admin console/API layer this installer deploys instead of
+# RustDesk Server Pro's closed-source console. Built from source at
+# install time (see ensure_go/ensure_node below) since there are no
+# published release binaries for these forks yet.
+API_OWNER="${API_OWNER:-Chr0mX}"
+API_REPO="${API_REPO:-rustdesk-api}"
+API_BRANCH="${API_BRANCH:-master}"
+WEB_OWNER="${WEB_OWNER:-Chr0mX}"
+WEB_REPO="${WEB_REPO:-rustdesk-api-web}"
+WEB_BRANCH="${WEB_BRANCH:-master}"
 
 # Optional token used for all GitHub API/download requests. Not needed
 # against a public repository beyond raising the API rate limit
@@ -30,10 +52,15 @@ GITHUB_RAW_HOST="${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}"
 # file and release asset URLs 404 for anonymous requests there.
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
-# PATH & DIR
+# PATH & DIR (hbbs/hbbr)
 RUSTDESK_INSTALL_DIR="${RUSTDESK_INSTALL_DIR:-/var/lib/rustdesk-server}"
 RUSTDESK_LOG_DIR="${RUSTDESK_LOG_DIR:-/var/log/rustdesk-server}"
 RUSTDESK_VERSION_FILE="$RUSTDESK_INSTALL_DIR/.installed_version"
+
+# PATH & DIR (rustdesk-api), matching the paths in rustdesk-api's own
+# systemd/rustdesk-api.service template.
+RUSTDESK_API_INSTALL_DIR="${RUSTDESK_API_INSTALL_DIR:-/var/lib/rustdesk-api}"
+RUSTDESK_API_LOG_DIR="${RUSTDESK_API_LOG_DIR:-/var/log/rustdesk-api}"
 
 # Non-interactive mode: set to "true" to disable all whiptail prompts.
 NONINTERACTIVE="${NONINTERACTIVE:-false}"
@@ -340,9 +367,11 @@ purge_linux_package() {
 # Architecture detection
 ############################################################
 
-# Maps uname -m output to the asset-name architecture alias used by
-# this fork's release artifacts. Add a line here to support a new
-# architecture without touching install.sh/update.sh.
+# Maps uname -m output to a canonical architecture alias. Add a line
+# here to support a new architecture without touching install.sh/update.sh.
+# rustdesk-server's own release assets use two DIFFERENT per-arch naming
+# conventions depending on asset type (zip vs deb) - zip_arch_alias()/
+# deb_arch_alias() below translate this canonical alias into each.
 detect_arch() {
     ARCH="$(uname -m)"
     case "$ARCH" in
@@ -360,6 +389,47 @@ detect_arch() {
             ;;
     esac
     export ARCH ARCH_ALIAS
+}
+
+# zip_arch_alias: rustdesk-server-linux-<alias>.zip naming.
+zip_arch_alias() {
+    case "$ARCH_ALIAS" in
+        amd64) echo "amd64" ;;
+        arm64) echo "arm64v8" ;;
+        armv7) echo "armv7" ;;
+        *) echo "" ;;
+    esac
+}
+
+# deb_arch_alias: rustdesk-server-{hbbs,hbbr,utils}_<version>_<alias>.deb
+# naming (standard Debian architecture names).
+deb_arch_alias() {
+    case "$ARCH_ALIAS" in
+        amd64) echo "amd64" ;;
+        arm64) echo "arm64" ;;
+        armv7) echo "armhf" ;;
+        *) echo "" ;;
+    esac
+}
+
+# go_arch_alias / node_arch_alias: naming used by go.dev/dl and
+# nodejs.org/dist releases respectively, for ensure_go/ensure_node.
+go_arch_alias() {
+    case "$ARCH_ALIAS" in
+        amd64) echo "amd64" ;;
+        arm64) echo "arm64" ;;
+        armv7) echo "armv6l" ;;
+        *) echo "" ;;
+    esac
+}
+
+node_arch_alias() {
+    case "$ARCH_ALIAS" in
+        amd64) echo "x64" ;;
+        arm64) echo "arm64" ;;
+        armv7) echo "armv7l" ;;
+        *) echo "" ;;
+    esac
 }
 
 ############################################################
@@ -412,12 +482,14 @@ _gh_curl() {
     curl "${args[@]}" "$@"
 }
 
-# Fetches the latest release JSON from GitHub for GITHUB_OWNER/GITHUB_REPO.
+# gh_fetch_latest_release <owner> <repo>
+# Fetches the latest release JSON from GitHub for <owner>/<repo>.
 # Sets RELEASE_JSON on success, returns 1 if no releases exist / API call
 # fails, so callers can gracefully fall back to the repo-root layout.
 gh_fetch_latest_release() {
-    debug "Querying latest release for ${GITHUB_OWNER}/${GITHUB_REPO}"
-    RELEASE_JSON=$(_gh_curl "$GITHUB_API/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest" 2>/dev/null) || return 1
+    local owner="$1" repo="$2"
+    debug "Querying latest release for ${owner}/${repo}"
+    RELEASE_JSON=$(_gh_curl "$GITHUB_API/repos/${owner}/${repo}/releases/latest" 2>/dev/null) || return 1
     [ -n "$RELEASE_JSON" ] || return 1
     if echo "$RELEASE_JSON" | grep -q '"message": *"Not Found"'; then
         return 1
@@ -433,6 +505,23 @@ gh_release_tag() {
         echo "$RELEASE_JSON" | jq -r '.tag_name'
     else
         echo "$RELEASE_JSON" | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+    fi
+}
+
+# gh_branch_sha <owner> <repo> <branch>
+# Resolves a branch's current commit SHA - used to version-track
+# components built from a branch (rustdesk-api/rustdesk-api-web) rather
+# than from a tagged release, so update.sh can tell whether the branch
+# has actually moved before rebuilding.
+gh_branch_sha() {
+    local owner="$1" repo="$2" branch="$3"
+    local json
+    json=$(_gh_curl "${GITHUB_API}/repos/${owner}/${repo}/git/ref/heads/${branch}" 2>/dev/null) || return 1
+    [ -n "$json" ] || return 1
+    if command -v jq &>/dev/null; then
+        echo "$json" | jq -r '.object.sha'
+    else
+        echo "$json" | grep '"sha"' | head -n1 | sed -E 's/.*"sha": *"([^"]+)".*/\1/'
     fi
 }
 
@@ -453,31 +542,30 @@ _gh_release_asset_lookup() {
     fi
 }
 
-# fetch_repo_file <path> <dest>
+# fetch_repo_file <owner> <repo> <branch> <path> <dest>
 # Downloads a file that lives at the repository root (Layout A), e.g.
 # lib.sh, install.sh, or a committed .tar.gz/.deb asset.
 fetch_repo_file() {
-    local path="$1"
-    local dest="$2"
+    local owner="$1" repo="$2" branch="$3" path="$4" dest="$5"
     if [ -n "$GITHUB_TOKEN" ]; then
         retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.raw+json" \
             -o "$dest" \
-            "${GITHUB_API}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${path}?ref=${GITHUB_BRANCH}"
+            "${GITHUB_API}/repos/${owner}/${repo}/contents/${path}?ref=${branch}"
     else
         retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused \
             -o "$dest" \
-            "${GITHUB_RAW_HOST}/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/${path}"
+            "${GITHUB_RAW_HOST}/${owner}/${repo}/${branch}/${path}"
     fi
 }
 
-# fetch_release_asset <asset-name> <dest>
+# fetch_release_asset <owner> <repo> <asset-name> <dest>
 # Downloads a named asset from RELEASE_JSON (Layout B). Caller must have
-# called gh_fetch_latest_release first and confirmed the asset exists.
+# called gh_fetch_latest_release for the same <owner>/<repo> first and
+# confirmed the asset exists.
 fetch_release_asset() {
-    local asset="$1"
-    local dest="$2"
+    local owner="$1" repo="$2" asset="$3" dest="$4"
     local id dl
     read -r id dl <<<"$(_gh_release_asset_lookup "$asset")"
     [ -n "$id" ] && [ "$id" != "null" ] || return 1
@@ -487,7 +575,7 @@ fetch_release_asset() {
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/octet-stream" \
             -o "$dest" \
-            "${GITHUB_API}/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/assets/${id}"
+            "${GITHUB_API}/repos/${owner}/${repo}/releases/assets/${id}"
     else
         [ -n "$dl" ] || return 1
         retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused -o "$dest" "$dl"
@@ -510,22 +598,21 @@ compute_sha256() {
     sha256sum "$1" | awk '{print $1}'
 }
 
-# verify_checksum <file> <asset-name>
+# verify_checksum <owner> <repo> <branch> <file> <asset-name>
 # Looks for a "<asset-name>.sha256" file next to the asset (release or
 # repo root, wherever the asset itself was found) and verifies the
 # downloaded file against it. If no checksum file is published, this
 # degrades gracefully to a warning rather than failing the install,
 # since checksums are optional infrastructure.
 verify_checksum() {
-    local file="$1"
-    local asset="$2"
+    local owner="$1" repo="$2" branch="$3" file="$4" asset="$5"
     local sumfile
     sumfile=$(mktemp)
     local got_sum="false"
 
-    if asset_exists_in_release "${asset}.sha256" && fetch_release_asset "${asset}.sha256" "$sumfile" 2>/dev/null; then
+    if asset_exists_in_release "${asset}.sha256" && fetch_release_asset "$owner" "$repo" "${asset}.sha256" "$sumfile" 2>/dev/null; then
         got_sum="true"
-    elif fetch_repo_file "${asset}.sha256" "$sumfile" 2>/dev/null; then
+    elif fetch_repo_file "$owner" "$repo" "$branch" "${asset}.sha256" "$sumfile" 2>/dev/null; then
         got_sum="true"
     fi
 
@@ -553,6 +640,9 @@ sanity_check_archive() {
         *.tar.gz|*.tgz)
             tar -tzf "$1" >/dev/null 2>&1
             ;;
+        *.zip)
+            unzip -t "$1" >/dev/null 2>&1
+            ;;
         *.deb)
             dpkg-deb -I "$1" >/dev/null 2>&1
             ;;
@@ -562,20 +652,19 @@ sanity_check_archive() {
     esac
 }
 
-# fetch_and_verify <asset-name> <dest-path>
+# fetch_and_verify <owner> <repo> <branch> <asset-name> <dest-path>
 # Full pipeline: prefer the release asset (Layout B), fall back to the
 # repo-root file (Layout A) -> corruption check -> checksum
 # verification (best-effort).
 fetch_and_verify() {
-    local asset="$1"
-    local dest="$2"
+    local owner="$1" repo="$2" branch="$3" asset="$4" dest="$5"
 
     info "Downloading $(basename "$dest") ..."
     if asset_exists_in_release "$asset"; then
-        fetch_release_asset "$asset" "$dest" || { error "Failed to download release asset '$asset'."; return 1; }
+        fetch_release_asset "$owner" "$repo" "$asset" "$dest" || { error "Failed to download release asset '$asset'."; return 1; }
     else
         [ -n "${RELEASE_JSON:-}" ] && debug "Asset '$asset' not found in release, falling back to repo root layout"
-        fetch_repo_file "$asset" "$dest" || { error "Failed to download '$asset' from ${GITHUB_OWNER}/${GITHUB_REPO}@${GITHUB_BRANCH}."; return 1; }
+        fetch_repo_file "$owner" "$repo" "$branch" "$asset" "$dest" || { error "Failed to download '$asset' from ${owner}/${repo}@${branch}."; return 1; }
     fi
 
     if [ ! -s "$dest" ]; then
@@ -586,20 +675,177 @@ fetch_and_verify() {
         error "$asset appears to be corrupted (failed integrity sanity check)."
         return 1
     fi
-    verify_checksum "$dest" "$asset"
+    verify_checksum "$owner" "$repo" "$branch" "$dest" "$asset"
+}
+
+# extract_archive <archive-path> <dest-dir>
+# Extracts a .zip or .tar.gz into <dest-dir>, which is created if needed.
+extract_archive() {
+    local archive="$1" dest="$2"
+    mkdir -p "$dest"
+    case "$archive" in
+        *.zip)
+            unzip -q -o "$archive" -d "$dest"
+            ;;
+        *.tar.gz|*.tgz)
+            tar -xzf "$archive" -C "$dest"
+            ;;
+        *)
+            die "extract_archive: unsupported archive type: $archive"
+            ;;
+    esac
+}
+
+# find_binary <search-dir> <binary-name>
+# Locates a named binary anywhere under <search-dir>, regardless of
+# whether the archive it came from nested it in an arch-named
+# subdirectory or shipped it flat - defensive against release layouts
+# this fork can't pin down without a live copy of every upstream's
+# archives. Echoes the path found, or nothing (caller should check).
+find_binary() {
+    find "$1" -type f -name "$2" 2>/dev/null | head -n1
+}
+
+############################################################
+# Building from source (rustdesk-api / rustdesk-api-web have no
+# published release binaries yet, so install.sh/update.sh build them
+# from source using the toolchains below).
+############################################################
+
+# fetch_source_tarball <owner> <repo> <ref> <dest-dir>
+# Downloads and extracts a repository's source at <ref> (branch, tag or
+# SHA) into <dest-dir> via GitHub's tarball API, which - unlike the
+# plain /archive/ redirect links - supports GITHUB_TOKEN the same way
+# every other fetch in this library does, so it works for private repos
+# too. <dest-dir> is replaced if it already exists.
+fetch_source_tarball() {
+    local owner="$1" repo="$2" ref="$3" dest_dir="$4"
+    local tmp_tar tmp_extract top_dir
+
+    tmp_tar=$(mktemp)
+    if ! _gh_curl -o "$tmp_tar" "${GITHUB_API}/repos/${owner}/${repo}/tarball/${ref}"; then
+        rm -f "$tmp_tar"
+        error "Failed to download source tarball for ${owner}/${repo}@${ref}."
+        return 1
+    fi
+    if [ ! -s "$tmp_tar" ]; then
+        rm -f "$tmp_tar"
+        error "Source tarball for ${owner}/${repo}@${ref} is empty."
+        return 1
+    fi
+
+    tmp_extract=$(mktemp -d)
+    if ! tar -xzf "$tmp_tar" -C "$tmp_extract"; then
+        rm -rf "$tmp_tar" "$tmp_extract"
+        error "Failed to extract source tarball for ${owner}/${repo}@${ref}."
+        return 1
+    fi
+    rm -f "$tmp_tar"
+
+    top_dir=$(find "$tmp_extract" -mindepth 1 -maxdepth 1 -type d | head -n1)
+    if [ -z "$top_dir" ]; then
+        rm -rf "$tmp_extract"
+        error "Unexpected source tarball layout for ${owner}/${repo}@${ref}."
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$dest_dir")"
+    rm -rf "$dest_dir"
+    mv "$top_dir" "$dest_dir"
+    rm -rf "$tmp_extract"
+}
+
+# ensure_go <min-minor-version>
+# Ensures a Go toolchain >= 1.<min-minor-version> is on PATH, installing
+# a pinned fallback version from go.dev if the distro's own Go package
+# is missing or too old. rustdesk-api needs a recent Go (see its go.mod)
+# for its use of go-sqlite3 (CGO) and other dependencies.
+GO_FALLBACK_VERSION="${GO_FALLBACK_VERSION:-go1.23.4}"
+ensure_go() {
+    local min_minor="${1:-23}"
+    if command -v go &>/dev/null; then
+        local ver minor
+        ver=$(go version | awk '{print $3}' | sed 's/^go//')
+        minor=$(echo "$ver" | cut -d. -f2)
+        if [ -n "$minor" ] && [ "$minor" -ge "$min_minor" ] 2>/dev/null; then
+            info "Using existing Go toolchain: $(go version)"
+            return 0
+        fi
+        warn "Installed Go ($ver) is older than required (1.${min_minor}+); installing ${GO_FALLBACK_VERSION} instead."
+    fi
+
+    local goarch
+    goarch=$(go_arch_alias)
+    [ -n "$goarch" ] || die "No Go toolchain available for architecture $ARCH."
+
+    info "Installing Go ${GO_FALLBACK_VERSION} toolchain..."
+    local tmp
+    tmp=$(mktemp)
+    retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused \
+        -o "$tmp" "https://go.dev/dl/${GO_FALLBACK_VERSION}.linux-${goarch}.tar.gz" \
+        || die "Failed to download the Go toolchain."
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "$tmp"
+    rm -f "$tmp"
+    export PATH="/usr/local/go/bin:$PATH"
+    command -v go &>/dev/null || die "Go installation appears to have failed."
+    success "Installed $(go version)"
+}
+
+# ensure_node <min-major-version>
+# Ensures Node.js >= <min-major-version> (with npm) is on PATH,
+# installing a pinned fallback version from nodejs.org if the distro's
+# own package is missing or too old. rustdesk-api-web's Vite 6 build
+# needs a reasonably recent Node.
+NODE_FALLBACK_VERSION="${NODE_FALLBACK_VERSION:-v20.18.1}"
+ensure_node() {
+    local min_major="${1:-18}"
+    if command -v node &>/dev/null; then
+        local ver major
+        ver=$(node -v)
+        major=$(echo "$ver" | sed 's/^v//' | cut -d. -f1)
+        if [ -n "$major" ] && [ "$major" -ge "$min_major" ] 2>/dev/null; then
+            info "Using existing Node.js: $ver"
+            return 0
+        fi
+        warn "Installed Node.js ($ver) is older than required (v${min_major}+); installing ${NODE_FALLBACK_VERSION} instead."
+    fi
+
+    local nodearch
+    nodearch=$(node_arch_alias)
+    [ -n "$nodearch" ] || die "No Node.js build available for architecture $ARCH."
+
+    info "Installing Node.js ${NODE_FALLBACK_VERSION} toolchain..."
+    local tmp
+    tmp=$(mktemp)
+    retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused \
+        -o "$tmp" "https://nodejs.org/dist/${NODE_FALLBACK_VERSION}/node-${NODE_FALLBACK_VERSION}-linux-${nodearch}.tar.xz" \
+        || die "Failed to download Node.js."
+    rm -rf /usr/local/lib/nodejs
+    mkdir -p /usr/local/lib/nodejs
+    tar -xJf "$tmp" -C /usr/local/lib/nodejs --strip-components=1
+    rm -f "$tmp"
+    export PATH="/usr/local/lib/nodejs/bin:$PATH"
+    command -v node &>/dev/null || die "Node.js installation appears to have failed."
+    success "Installed Node.js $(node -v), npm $(npm -v)"
 }
 
 ############################################################
 # Version bookkeeping
 ############################################################
 
+# write_installed_version <component> <version>
+# <component> is one of: hbbs, api, web - tracked separately since each
+# now comes from a different upstream and updates independently.
 write_installed_version() {
     mkdir -p "$(dirname "$RUSTDESK_VERSION_FILE")"
-    echo "$1" > "$RUSTDESK_VERSION_FILE"
+    mkdir -p "${RUSTDESK_VERSION_FILE}.d"
+    echo "$2" > "${RUSTDESK_VERSION_FILE}.d/$1"
 }
 
+# read_installed_version <component>
 read_installed_version() {
-    [ -f "$RUSTDESK_VERSION_FILE" ] && cat "$RUSTDESK_VERSION_FILE" || echo ""
+    [ -f "${RUSTDESK_VERSION_FILE}.d/$1" ] && cat "${RUSTDESK_VERSION_FILE}.d/$1" || echo ""
 }
 
 ############################################################
