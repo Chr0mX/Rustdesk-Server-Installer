@@ -12,8 +12,8 @@ component comes from a genuinely open, freely-licensed project:
 | rustdesk-api-web (admin console frontend) | [Chr0mX/rustdesk-api-web](https://github.com/Chr0mX/rustdesk-api-web), a fork of [lejianwen/rustdesk-api-web](https://github.com/lejianwen/rustdesk-api-web) | MIT |
 
 Earlier versions of this repository vendored the closed-source RustDesk
-Server Pro binaries directly; those have been removed (see
-[MIGRATION.md](MIGRATION.md)) in favor of this fully open stack.
+Server Pro binaries directly; those have been removed in favor of this
+fully open stack.
 
 ## What's in here
 
@@ -191,6 +191,3 @@ binary+built frontend assets before touching anything, independently
 for each component. If the post-upgrade services don't reach an active
 state within 60 seconds, it automatically restores the backup and
 restarts the services, so a failed update never leaves the server down.
-
-See [`MIGRATION.md`](MIGRATION.md) for what changed from the original
-scripts and why.
