@@ -1,127 +1,176 @@
 #!/bin/bash
+#
+# convertfromos.sh - Migrates a legacy RustDesk Server Open Source
+# installation (gohttpserver/rustdesksignal/rustdeskrelay systemd units,
+# keys under /opt/rustdesk) to this fork's installer and asset
+# infrastructure.
+#
+# It stops and removes the old services, runs this fork's own
+# install.sh (never the official RustDesk one), and migrates the old
+# keypair into the new install directory.
+#
+# Usage:
+#   ./convertfromos.sh [options]
+#
+# Options (forwarded to install.sh):
+#   -y, --non-interactive
+#       --user <name>
+#       --domain <fqdn>
+#       --ip
+#       --owner <owner>
+#       --repo <repo>
+#       --branch <branch>
+#   -h, --help   Show this help and exit
 
-# This script will do the following to install RustDesk Server Pro replacing RustDesk Server Open Source
-# 1. Disable and removes the old services
-# 2. Install some dependencies
-# 3. Setup UFW firewall if available
-# 4. Create a folder /var/lib/rustdesk-server and copy the certs here
-# 5. Download and extract RustDesk Pro Services to the above folder
-# 6. Create systemd services for hbbs and hbbr
-# 7. If you choose Domain, it will install Nginx and Certbot, allowing the API to be available on port 443 (https) and get an SSL certificate over port 80, it is automatically renewed
+set -uo pipefail
+
+print_usage() {
+    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//' | sed -n '2,20p'
+}
+
+INSTALL_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --owner)
+            GITHUB_OWNER="$2"; INSTALL_ARGS+=("$1" "$2"); shift
+            ;;
+        --repo)
+            GITHUB_REPO="$2"; INSTALL_ARGS+=("$1" "$2"); shift
+            ;;
+        --branch)
+            GITHUB_BRANCH="$2"; INSTALL_ARGS+=("$1" "$2"); shift
+            ;;
+        -y|--non-interactive)
+            NONINTERACTIVE="true"; INSTALL_ARGS+=("$1")
+            ;;
+        *)
+            INSTALL_ARGS+=("$1")
+            ;;
+    esac
+    shift
+done
+
+export NONINTERACTIVE="${NONINTERACTIVE:-false}"
+export GITHUB_OWNER GITHUB_REPO GITHUB_BRANCH
 
 ##################################################################################################################
+# Bootstrap lib.sh from this fork's own repository
+##################################################################################################################
 
-# Install curl and whiptail if needed
-if [ ! -x "$(command -v curl)" ] || [ ! -x "$(command -v whiptail)" ]
-then
-    # We need curl to fetch the lib
-    # There are the package managers for different OS:
-    # osInfo[/etc/redhat-release]=yum
-    # osInfo[/etc/arch-release]=pacman
-    # osInfo[/etc/gentoo-release]=emerge
-    # osInfo[/etc/SuSE-release]=zypp
-    # osInfo[/etc/debian_version]=apt-get
-    # osInfo[/etc/alpine-release]=apk
+if [ ! -x "$(command -v curl)" ] || [ ! -x "$(command -v whiptail)" ]; then
     NEEDED_DEPS=(curl whiptail)
-    echo "Installing these packages:" "${NEEDED_DEPS[@]}"
-    if [ -x "$(command -v apt-get)" ]
-    then
-        sudo apt-get install "${NEEDED_DEPS[@]}" -y
-    elif [ -x "$(command -v apk)" ]
-    then
-        sudo apk add --no-cache "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v dnf)" ]
-    then
-        sudo dnf install "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v zypper)" ]
-    then
-        sudo zypper install "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v pacman)" ]
-    then
-        sudo pacman -S install "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v yum)" ]
-    then
-        sudo yum install "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v emerge)" ]
-    then
-        sudo emerge -av "${NEEDED_DEPS[@]}"
+    echo "Installing these packages: ${NEEDED_DEPS[*]}"
+    if [ -x "$(command -v apt-get)" ]; then
+        apt-get install "${NEEDED_DEPS[@]}" -y
+    elif [ -x "$(command -v apk)" ]; then
+        apk add --no-cache "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v dnf)" ]; then
+        dnf install -y "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v zypper)" ]; then
+        zypper --non-interactive install "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v pacman)" ]; then
+        pacman -S --noconfirm "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v yum)" ]; then
+        yum install -y "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v emerge)" ]; then
+        emerge -av "${NEEDED_DEPS[@]}"
     else
-        echo "FAILED TO INSTALL! Package manager not found. You must manually install:" "${NEEDED_DEPS[@]}"
+        echo "FAILED TO INSTALL! Package manager not found. You must manually install: ${NEEDED_DEPS[*]}" >&2
         exit 1
     fi
 fi
 
-# We need to source directly from the Github repo to be able to use the functions here
-# shellcheck disable=2034,2059,2164
-true
-SCRIPT_NAME="Install script"
+SCRIPT_NAME="Convert-from-OS script"
 export SCRIPT_NAME
-# shellcheck source=lib.sh
-source <(curl -sL https://raw.githubusercontent.com/rustdesk/rustdesk-server-pro/main/lib.sh)
-# see https://github.com/koalaman/shellcheck/wiki/Directive
+# Fetches a file from the repo root, transparently authenticating with
+# GITHUB_TOKEN when set (required if this fork is kept private).
+_bootstrap_fetch_repo_file() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github.raw+json" \
+            "${GITHUB_API:-https://api.github.com}/repos/${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}/contents/${1}?ref=${GITHUB_BRANCH:-main}"
+    else
+        curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused \
+            "${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}/${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}/${GITHUB_BRANCH:-main}/${1}"
+    fi
+}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P)"
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib.sh" ]; then
+    # shellcheck source=lib.sh
+    source "$SCRIPT_DIR/lib.sh"
+else
+    LIB_SRC=$(_bootstrap_fetch_repo_file lib.sh) || { echo "FATAL: could not fetch lib.sh from ${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}@${GITHUB_BRANCH:-main}" >&2; exit 1; }
+    # shellcheck source=/dev/null
+    source <(echo "$LIB_SRC")
+fi
 unset SCRIPT_NAME
 
 ##################################################################################################################
 
-# Check if root
 root_check
 
-# Output debugging info if $DEBUG set
-if [ "$DEBUG" = "true" ]
-then
+if [ "${DEBUG:-false}" = "true" ]; then
     identify_os
-    print_text_in_color "$ICyan" "OS: $OS"
-    print_text_in_color "$ICyan" "VER: $VER"
-    print_text_in_color "$ICyan" "UPSTREAM_ID: $UPSTREAM_ID"
+    info "OS: $OS / VER: $VER / UPSTREAM_ID: $UPSTREAM_ID"
     exit 0
 fi
 
-# Stop all old services
-sudo systemctl stop gohttpserver.service
-sudo systemctl stop rustdesksignal.service
-sudo systemctl stop rustdeskrelay.service
-sudo systemctl disable gohttpserver.service
-sudo systemctl disable rustdesksignal.service
-sudo systemctl disable rustdeskrelay.service
-sudo rm -f /etc/systemd/system/gohttpserver.service
-sudo rm -f /etc/systemd/system/rustdesksignal.service
-sudo rm -f /etc/systemd/system/rustdeskrelay.service
+##################################################################################################################
+# Stop and remove legacy Open Source services
+##################################################################################################################
 
-# Install Rustdesk again 
-# It won't install RustDesk again since there's a check in the install script which checks for the installation folder, but services and everything else will be created
-# Would it be possible to move L93-98 after the installation?
-if ! curl -fSLO --retry 3 https://raw.githubusercontent.com/rustdesk/rustdesk-server-pro/main/install.sh
-then
-    msg_box "Sorry, we couldn't fetch the install script, please try again.
-Your old installation still lives in /opt/rustdesk"
-    exit
+info "Removing legacy RustDesk Server Open Source services..."
+for legacy_svc in gohttpserver rustdesksignal rustdeskrelay; do
+    stop_and_disable_service "${legacy_svc}.service"
+    rm -f "/etc/systemd/system/${legacy_svc}.service"
+done
+systemctl daemon-reload
+
+LEGACY_KEY_DIR="/opt/rustdesk"
+
+##################################################################################################################
+# Run this fork's own install.sh (never the official RustDesk one)
+##################################################################################################################
+
+info "Running this fork's install.sh..."
+INSTALL_SH_LOCAL="$SCRIPT_DIR/install.sh"
+TMP_INSTALL=""
+if [ -f "$INSTALL_SH_LOCAL" ]; then
+    INSTALL_CMD=(bash "$INSTALL_SH_LOCAL" "${INSTALL_ARGS[@]}")
 else
-    if sudo bash -x install.sh
-    then
-        rm -f install.sh
-        # Migration tasks
-        if [ -d /opt/rustdesk ]
-        then
-            # First remove the keys generated by the installation script
-            rm -f "$RUSTDESK_INSTALL_DIR"/id_*
-            # Then copy over the old keys to the new install dir
-            if cp -f /opt/rustdesk/id_* "$RUSTDESK_INSTALL_DIR/"
-            then
-                # Make sure to really protect the old keys by checking that the new service actually restarts with 0 status before removing the old keys.
-                if systemctl restart rustdesk-hbbr.service && systemctl restart rustdesk-hbbs.service
-                then
-                    rm -rf /opt/rustdesk
-                else
-                    msg_box "Sorry, couldn't restart the new services. Please send your output to https://github.com/rustdesk/rustdesk-server-pro in a new issue."
-                fi
-            else
-                msg_box "Sorry, but it seems that something went wrong with copying your old keys to the new install dir. Please try again"
-                exit 1
-            fi
+    # install.sh lives at the repo root (not a release asset), so fetch
+    # it directly from this fork's own repository.
+    TMP_INSTALL=$(mktemp)
+    _bootstrap_fetch_repo_file install.sh > "$TMP_INSTALL" || die "Could not fetch install.sh from ${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}@${GITHUB_BRANCH:-main}"
+    INSTALL_CMD=(bash "$TMP_INSTALL" "${INSTALL_ARGS[@]}")
+fi
+
+if ! "${INSTALL_CMD[@]}"; then
+    die "install.sh failed. Your old installation, if any, is still available in $LEGACY_KEY_DIR."
+fi
+[ -n "$TMP_INSTALL" ] && rm -f "$TMP_INSTALL"
+
+##################################################################################################################
+# Migrate the legacy keypair
+##################################################################################################################
+
+if [ -d "$LEGACY_KEY_DIR" ]; then
+    info "Migrating keys from $LEGACY_KEY_DIR to $RUSTDESK_INSTALL_DIR..."
+    rm -f "$RUSTDESK_INSTALL_DIR"/id_*
+    if cp -f "$LEGACY_KEY_DIR"/id_* "$RUSTDESK_INSTALL_DIR/" 2>/dev/null; then
+        if systemctl restart rustdesk-hbbr.service && systemctl restart rustdesk-hbbs.service; then
+            rm -rf "$LEGACY_KEY_DIR"
+            success "Key migration complete; legacy directory removed."
+        else
+            error "The new services failed to restart with the migrated keys. Legacy directory kept at $LEGACY_KEY_DIR for manual recovery."
         fi
-        msg_box "Conversion from OS seems to have been OK!"
     else
-        msg_box "Sorry, but something seems to have gone wrong, please report this to:
-https://github.com/rustdesk/rustdesk-server-pro/"
+        warn "No id_* key files found in $LEGACY_KEY_DIR; nothing to migrate. New keys generated by install.sh remain in place."
     fi
 fi
+
+success "Conversion from RustDesk Server Open Source complete."

@@ -1,496 +1,500 @@
 #!/bin/bash
+#
+# install.sh - RustDesk Server installer (community fork)
+#
+# Installs hbbs (rendezvous/signal server) and hbbr (relay server) using
+# release assets published on this fork's own GitHub repository -
+# there is no dependency on github.com/rustdesk or rustdesk.com.
+#
+# What this script does:
+#   1. Detects CPU architecture and Linux distribution
+#   2. Installs required dependencies via the distro's package manager
+#   3. Resolves the latest release from the GitHub Releases API
+#      (falls back to repo-root files if no release exists)
+#   4. Downloads, verifies and installs hbbs/hbbr/rustdesk-utils
+#   5. Creates systemd services for hbbs and hbbr
+#   6. Optionally sets up Nginx + Certbot for a TLS-terminated domain
+#   7. Supports a fully non-interactive mode for scripted deployments
+#
+# Usage:
+#   ./install.sh [options]
+#
+# Options:
+#   -y, --non-interactive     Never prompt; use flags/env vars for input
+#       --user <name>         Run hbbs/hbbr as this unprivileged user
+#       --domain <fqdn>       Use a domain + Let's Encrypt TLS via Nginx
+#       --ip                  Use IP-only mode (no domain/TLS)
+#       --owner <owner>       Override the GitHub repo owner for assets
+#       --repo <repo>         Override the GitHub repo name for assets
+#       --branch <branch>     Override the branch used for repo-root fallback
+#       --no-certbot-snap     Use distro packages for Certbot instead of snap
+#   -h, --help                Show this help and exit
+#
+# All options can also be provided via environment variables:
+#   NONINTERACTIVE, RUSTDESK_USER, RUSTDESK_DOMAIN, GITHUB_OWNER,
+#   GITHUB_REPO, GITHUB_BRANCH, CERTBOT_USE_SNAP
 
-# This script will do the following to install RustDesk Server Pro
-# 1. Install some dependencies
-# 2. Setup UFW firewall if available
-# 3. Create 2 folders /var/lib/rustdesk-server and /var/log/rustdesk-server ("$RUSTDESK_INSTALL_DIR" and "$RUSTDESK_LOG_DIR")
-# 4. Download and extract RustDesk Pro Services to the above folder
-# 5. Create systemd services for hbbs and hbbr
-# 6. If you choose Domain, it will install Nginx and Certbot, allowing the API to be available on port 443 (https) and get an SSL certificate over port 80, it is automatically renewed
-
-# Please note; even if the script is run as root, you will still be able to choose a non-root user during setup.
+set -uo pipefail
 
 ##################################################################################################################
+# Argument parsing (done before sourcing lib.sh; only sets env vars)
+##################################################################################################################
 
-TLS=""
-if command -v ldconfig &> /dev/null; then
-    if ldconfig -p | grep -q "libssl.so.3"; then
-        TLS="-nativetls"
-    fi
-fi
+RUSTDESK_DOMAIN="${RUSTDESK_DOMAIN:-}"
+RUSTDESK_USER="${RUSTDESK_USER:-}"
+FORCE_IP_MODE="false"
+CERTBOT_USE_SNAP="${CERTBOT_USE_SNAP:-true}"
 
-# Install curl and whiptail if needed
-if [ ! -x "$(command -v curl)" ] || [ ! -x "$(command -v whiptail)" ]
-then
-    # We need curl to fetch the lib
-    # There are the package managers for different OS:
-    # osInfo[/etc/redhat-release]=yum
-    # osInfo[/etc/arch-release]=pacman
-    # osInfo[/etc/gentoo-release]=emerge
-    # osInfo[/etc/SuSE-release]=zypp
-    # osInfo[/etc/debian_version]=apt-get
-    # osInfo[/etc/alpine-release]=apk
+print_usage() {
+    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//' | sed -n '2,30p'
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -y|--non-interactive)
+            NONINTERACTIVE="true"
+            ;;
+        --user)
+            RUSTDESK_USER="$2"; shift
+            ;;
+        --domain)
+            RUSTDESK_DOMAIN="$2"; shift
+            ;;
+        --ip)
+            FORCE_IP_MODE="true"
+            ;;
+        --owner)
+            GITHUB_OWNER="$2"; shift
+            ;;
+        --repo)
+            GITHUB_REPO="$2"; shift
+            ;;
+        --branch)
+            GITHUB_BRANCH="$2"; shift
+            ;;
+        --no-certbot-snap)
+            CERTBOT_USE_SNAP="false"
+            ;;
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            print_usage
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+export NONINTERACTIVE="${NONINTERACTIVE:-false}"
+export RUSTDESK_USER RUSTDESK_DOMAIN GITHUB_OWNER GITHUB_REPO GITHUB_BRANCH CERTBOT_USE_SNAP
+
+##################################################################################################################
+# Bootstrap: minimal deps + source lib.sh from this fork's own repository
+##################################################################################################################
+
+if [ ! -x "$(command -v curl)" ] || [ ! -x "$(command -v whiptail)" ]; then
     NEEDED_DEPS=(curl whiptail)
-    echo "Installing these packages:" "${NEEDED_DEPS[@]}"
-    if [ -x "$(command -v apt-get)" ]
-    then
-        sudo apt-get install "${NEEDED_DEPS[@]}" -y
-    elif [ -x "$(command -v apk)" ]
-    then
-        sudo apk add --no-cache "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v dnf)" ]
-    then
-        sudo dnf install "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v zypper)" ]
-    then
-        sudo zypper install "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v pacman)" ]
-    then
-        sudo pacman -S install "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v yum)" ]
-    then
-        sudo yum install "${NEEDED_DEPS[@]}"
-    elif [ -x "$(command -v emerge)" ]
-    then
-        sudo emerge -av "${NEEDED_DEPS[@]}"
+    echo "Installing these packages: ${NEEDED_DEPS[*]}"
+    if [ -x "$(command -v apt-get)" ]; then
+        apt-get install "${NEEDED_DEPS[@]}" -y
+    elif [ -x "$(command -v apk)" ]; then
+        apk add --no-cache "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v dnf)" ]; then
+        dnf install -y "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v zypper)" ]; then
+        zypper --non-interactive install "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v pacman)" ]; then
+        pacman -S --noconfirm "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v yum)" ]; then
+        yum install -y "${NEEDED_DEPS[@]}"
+    elif [ -x "$(command -v emerge)" ]; then
+        emerge -av "${NEEDED_DEPS[@]}"
     else
-        echo "FAILED TO INSTALL! Package manager not found. You must manually install:" "${NEEDED_DEPS[@]}"
+        echo "FAILED TO INSTALL! Package manager not found. You must manually install: ${NEEDED_DEPS[*]}" >&2
         exit 1
     fi
 fi
 
-# We need to source directly from the Github repo to be able to use the functions here
-# shellcheck disable=2034,2059,2164
-true
 SCRIPT_NAME="Install script"
 export SCRIPT_NAME
-# shellcheck source=lib.sh
-source <(curl -sL https://raw.githubusercontent.com/rustdesk/rustdesk-server-pro/main/lib.sh)
-# see https://github.com/koalaman/shellcheck/wiki/Directive
+# Fetches a file from the repo root, transparently authenticating with
+# GITHUB_TOKEN when set (required if this fork is kept private).
+_bootstrap_fetch_repo_file() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github.raw+json" \
+            "${GITHUB_API:-https://api.github.com}/repos/${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}/contents/${1}?ref=${GITHUB_BRANCH:-main}"
+    else
+        curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused \
+            "${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}/${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}/${GITHUB_BRANCH:-main}/${1}"
+    fi
+}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P)"
+if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib.sh" ]; then
+    # shellcheck source=lib.sh
+    source "$SCRIPT_DIR/lib.sh"
+else
+    LIB_SRC=$(_bootstrap_fetch_repo_file lib.sh) || { echo "FATAL: could not fetch lib.sh from ${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}@${GITHUB_BRANCH:-main}" >&2; exit 1; }
+    # shellcheck source=/dev/null
+    source <(echo "$LIB_SRC")
+fi
 unset SCRIPT_NAME
 
 ##################################################################################################################
 
-# Check if root
 root_check
 
-# Output debugging info if $DEBUG set
-if [ "$DEBUG" = "true" ]
-then
+if [ "${DEBUG:-false}" = "true" ]; then
     identify_os
-    print_text_in_color "$ICyan" "OS: $OS"
-    print_text_in_color "$ICyan" "VER: $VER"
-    print_text_in_color "$ICyan" "UPSTREAM_ID: $UPSTREAM_ID"
+    detect_arch
+    detect_pkg_manager
+    detect_firewall
+    info "OS: $OS / VER: $VER / UPSTREAM_ID: $UPSTREAM_ID"
+    info "ARCH: $ARCH / ARCH_ALIAS: $ARCH_ALIAS"
+    info "PKG_MANAGER: $PKG_MANAGER / FIREWALL: $FIREWALL"
+    info "GitHub source: ${GITHUB_OWNER}/${GITHUB_REPO}@${GITHUB_BRANCH}"
     exit 0
 fi
 
-# We need the WAN IP
+detect_arch
+[ -n "$ARCH_ALIAS" ] || die "Unsupported CPU architecture: $ARCH. Supported: x86_64/amd64, aarch64/arm64, armv7l."
+
+identify_os
+detect_pkg_manager
+[ -n "$PKG_MANAGER" ] || die "Unsupported distribution: no known package manager (apt/dnf/yum/zypper/pacman/apk/emerge) found."
+detect_firewall
+
+info "Detected: $OS $VER, arch=$ARCH_ALIAS, package manager=$PKG_MANAGER, firewall=$FIREWALL"
+
 get_wanip4
 
-# Automatic restart of services while installing
-# Restart mode: (l)ist only, (i)nteractive or (a)utomatically.
-if [ ! -f /etc/needrestart/needrestart.conf ]
-then
-    install_linux_package needrestart
-    if ! grep -rq "{restart} = 'a'" /etc/needrestart/needrestart.conf
-    then
-        # Restart mode: (l)ist only, (i)nteractive or (a)utomatically.
+# Automatic restart of services while installing packages.
+if [ ! -f /etc/needrestart/needrestart.conf ]; then
+    install_linux_package needrestart || true
+    if [ -f /etc/needrestart/needrestart.conf ] && ! grep -rq "{restart} = 'a'" /etc/needrestart/needrestart.conf; then
         sed -i "s|#\$nrconf{restart} =.*|\$nrconf{restart} = 'a'\;|g" /etc/needrestart/needrestart.conf
     fi
 fi
 
-# Select user for installation
-msg_box "Rustdesk can be installed as an unprivileged user, but we need root for everything else.
+##################################################################################################################
+# Select the user hbbs/hbbr will run as
+##################################################################################################################
+
+if [ -z "$RUSTDESK_USER" ] && [ "$NONINTERACTIVE" != "true" ]; then
+    msg_box "RustDesk can be installed as an unprivileged user, but we need root for everything else.
 Running with an unprivileged user enhances security, and is recommended."
 
-if yesno_box_yes "Do you want to use an unprivileged user for Rustdesk?"
-then
-    while :
-    do
-        RUSTDESK_USER=$(input_box_flow "Please enter the name of your non-root user:")
-        if ! id "$RUSTDESK_USER"
-        then
-            msg_box "We couldn't find $RUSTDESK_USER on the system, are you sure it's correct?
-Please try again."
-        else
-            break
-        fi
-    done
-
-    run_as_non_root_user() {
-        sudo -u "$RUSTDESK_USER" "$@";
-    }
-fi
-
-# Install needed dependencies
-install_linux_package unzip
-install_linux_package tar
-install_linux_package dnsutils
-install_linux_package ufw
-if ! install_linux_package bind9-utils
-then
-    install_linux_package bind-utils
-fi
-if ! install_linux_package bind9
-then
-    install_linux_package bind
-fi
-
-# Setting up firewall
-ufw allow 21115:21119/tcp
-ufw allow 22/tcp
-ufw allow 21116/udp
-
-# Download latest version of RustDesk
-RDLATEST=$(curl https://api.github.com/repos/rustdesk/rustdesk-server-pro/releases/latest -s | grep "tag_name"| awk '{print substr($2, 2, length($2)-3) }')
-
-# Download, extract, and move Rustdesk in place
-if [ -n "${ARCH}" ]
-then
-    # If not /var/lib/rustdesk-server/ ($RUSTDESK_INSTALL_DIR) exists we can assume this is a fresh install. If it exists though, we can't move it and it will produce an error
-    if [ ! -d "$RUSTDESK_INSTALL_DIR" ]
-    then
-        print_text_in_color "$IGreen" "Installing RustDesk Server..."
-        # Create dir
-        mkdir -p "$RUSTDESK_INSTALL_DIR"
-        if [ -d "$RUSTDESK_INSTALL_DIR" ]
-        then
-            cd "$RUSTDESK_INSTALL_DIR"
-        else
-            msg_box "It seems like the installation folder wasn't created, we can't continue.
-Please report this to: https://github.com/rustdesk/rustdesk-server-pro/issues"
-            exit 1
-        fi
-        # Since the name of the actual tar files differs from the output of uname -m we need to rename acutal download file.
-        # Preferably we would instead rename the download tarballs to the output of uname -m. This would make it possible to run a single $VAR for ARCH.
-        if [ "${ARCH}" = "x86_64" ]
-        then
-            ACTUAL_TAR_NAME=amd64
-        elif [ "${ARCH}" = "armv7l" ]
-        then
-            ACTUAL_TAR_NAME=armv7
-        elif [ "${ARCH}" = "aarch64" ]
-        then
-            ACTUAL_TAR_NAME=arm64v8
-        fi
-        ACTUAL_TAR_NAME=${ACTUAL_TAR_NAME}${TLS}
-        # Download
-        if ! curl -fSLO --retry 3 https://github.com/rustdesk/rustdesk-server-pro/releases/download/"${RDLATEST}"/rustdesk-server-linux-"${ACTUAL_TAR_NAME}".tar.gz
-        then
-            msg_box "Sorry, the installation package failed to download.
-This might be temporary, so please try to run the installation script again."
-            exit 1
-        fi
-        # Extract, move in place, and make it executable
-        tar -xf rustdesk-server-linux-"${ACTUAL_TAR_NAME}".tar.gz
-        # Set permissions
-        if [ -n "$RUSTDESK_USER" ]
-        then
-            chown "$RUSTDESK_USER":"$RUSTDESK_USER" -R "$RUSTDESK_INSTALL_DIR"
-        fi
-        # Move as root if RUSTDESK_USER is not set.
-        if [ -n "$RUSTDESK_USER" ]
-        then
-            run_as_non_root_user mv "${ACTUAL_TAR_NAME}"/static "$RUSTDESK_INSTALL_DIR"
-        else
-            mv "${ACTUAL_TAR_NAME}"/static "$RUSTDESK_INSTALL_DIR"
-        fi
-        mv "${ACTUAL_TAR_NAME}"/hbbr /usr/bin/
-        mv "${ACTUAL_TAR_NAME}"/hbbs /usr/bin/
-        mv "${ACTUAL_TAR_NAME}"/rustdesk-utils /usr/bin/
-        rm -rf "$RUSTDESK_INSTALL_DIR"/"${ACTUAL_TAR_NAME:?}"
-        rm -rf rustdesk-server-linux-"${ACTUAL_TAR_NAME}".tar.gz
-        chmod +x /usr/bin/hbbs
-        chmod +x /usr/bin/hbbr
-        chmod +x /usr/bin/rustdesk-utils
-        if [ -n "$RUSTDESK_USER" ]
-        then
-            chown "$RUSTDESK_USER":"$RUSTDESK_USER" -R /usr/bin/hbbr
-            chown "$RUSTDESK_USER":"$RUSTDESK_USER" -R /usr/bin/hbbs
-            chown "$RUSTDESK_USER":"$RUSTDESK_USER" -R /usr/bin/rustdesk-utils
-        fi
-    else
-        print_text_in_color "$IGreen" "Rustdesk server already installed."
-    fi
-else
-    msg_box "Sorry, we can't figure out your distro, this script will now exit.
-Please report this to: https://github.com/rustdesk/rustdesk-server-pro/issues"
-    exit 1
-fi
-
-# Make folder /var/log/rustdesk-server/
-if [ ! -d "$RUSTDESK_LOG_DIR" ]
-then
-    print_text_in_color "$IGreen" "Creating $RUSTDESK_LOG_DIR"
-    install -d -m 700 "$RUSTDESK_LOG_DIR"
-    # Set permissions
-    if [ -n "$RUSTDESK_USER" ]
-    then
-         chown -R "$RUSTDESK_USER":"$RUSTDESK_USER" "$RUSTDESK_LOG_DIR"
-    fi
-fi
-
-# Setup systemd to launch hbbs
-if [ ! -f "/etc/systemd/system/rustdesk-hbbs.service" ]
-then
-    touch "/etc/systemd/system/rustdesk-hbbs.service"
-    if [ -n "$RUSTDESK_USER" ]
-    then
-    cat << HBBS_RUSTDESK_SERVICE > "/etc/systemd/system/rustdesk-hbbs.service"
-[Unit]
-Description=RustDesk Signal Server
-[Service]
-Type=simple
-LimitNOFILE=1000000
-ExecStart=/usr/bin/hbbs
-WorkingDirectory=$RUSTDESK_INSTALL_DIR
-User=${RUSTDESK_USER}
-Group=${RUSTDESK_USER}
-Restart=always
-StandardOutput=append:$RUSTDESK_LOG_DIR/hbbs.log
-StandardError=append:$RUSTDESK_LOG_DIR/hbbs.error
-# Restart service after 10 seconds if node service crashes
-RestartSec=10
-[Install]
-WantedBy=multi-user.target
-HBBS_RUSTDESK_SERVICE
-else
-    cat << HBBS_RUSTDESK_SERVICE > "/etc/systemd/system/rustdesk-hbbs.service"
-[Unit]
-Description=RustDesk Signal Server
-[Service]
-Type=simple
-LimitNOFILE=1000000
-ExecStart=/usr/bin/hbbs
-WorkingDirectory=$RUSTDESK_INSTALL_DIR
-User=root
-Group=root
-Restart=always
-StandardOutput=append:$RUSTDESK_LOG_DIR/hbbs.log
-StandardError=append:$RUSTDESK_LOG_DIR/hbbs.error
-# Restart service after 10 seconds if node service crashes
-RestartSec=10
-[Install]
-WantedBy=multi-user.target
-HBBS_RUSTDESK_SERVICE
-    fi
-fi
-
-# Setup systemd to launch hbbr
-if [ ! -f "/etc/systemd/system/rustdesk-hbbr.service" ]
-then
-    touch "/etc/systemd/system/rustdesk-hbbr.service"
-    if [ -n "$RUSTDESK_USER" ]
-    then
-    cat << HBBR_RUSTDESK_SERVICE > "/etc/systemd/system/rustdesk-hbbr.service"
-[Unit]
-Description=RustDesk Relay Server
-[Service]
-Type=simple
-LimitNOFILE=1000000
-ExecStart=/usr/bin/hbbr
-WorkingDirectory=$RUSTDESK_INSTALL_DIR
-User=${RUSTDESK_USER}
-Group=${RUSTDESK_USER}
-Restart=always
-StandardOutput=append:$RUSTDESK_LOG_DIR/hbbr.log
-StandardError=append:$RUSTDESK_LOG_DIR/hbbr.error
-# Restart service after 10 seconds if node service crashes
-RestartSec=10
-[Install]
-WantedBy=multi-user.target
-HBBR_RUSTDESK_SERVICE
-else
-    cat << HBBR_RUSTDESK_SERVICE > "/etc/systemd/system/rustdesk-hbbr.service"
-[Unit]
-Description=RustDesk Relay Server
-[Service]
-Type=simple
-LimitNOFILE=1000000
-ExecStart=/usr/bin/hbbr
-WorkingDirectory=$RUSTDESK_INSTALL_DIR
-User=root
-Group=root
-Restart=always
-StandardOutput=append:$RUSTDESK_LOG_DIR/hbbr.log
-StandardError=append:$RUSTDESK_LOG_DIR/hbbr.error
-# Restart service after 10 seconds if node service crashes
-RestartSec=10
-[Install]
-WantedBy=multi-user.target
-HBBR_RUSTDESK_SERVICE
-    fi
-fi
-
-# Enable services
-# HBBR
-systemctl enable rustdesk-hbbr.service
-systemctl start rustdesk-hbbr.service
-# HBBS
-systemctl enable rustdesk-hbbs.service
-systemctl start rustdesk-hbbs.service
-
-while :
-do
-    if ! systemctl status rustdesk-hbbr.service | grep "Active: active (running)"
-    then
-        sleep 2
-        print_text_in_color "$ICyan" "Waiting for RustDesk Relay service to become active..."
-    else
-        break
-    fi
-done
-
-while :
-do
-    PUBKEYNAME=$(find "$RUSTDESK_INSTALL_DIR" -name "*.pub")
-    if [ -z "$PUBKEYNAME" ]
-    then
-        print_text_in_color "$ICyan" "Checking if public key is generated..."
-        sleep 5
-    else
-        print_text_in_color "$IGreen" "Public key path: $PUBKEYNAME"
-        PUBLICKEY=$(cat "$PUBKEYNAME")
-        break
-    fi
-done
-
-choice=$(whiptail --title "Rustdesk installation script" --menu \
-"Choose your preferred option, IP or DNS/Domain:
-
-IP  = You don't want to set up TLS
-DNS = Setup RustDesk with TLS based on NGINX and free TLS certificates of letsencrypt
-$MENU_GUIDE\n\n$RUN_LATER_GUIDE" "$WT_HEIGHT" "$WT_WIDTH" 4 \
-"IP" "($WANIP4)" \
-"DNS" "(e.g. rustdesk.example.com)" 3>&1 1>&2 2>&3)
-
-case "$choice" in
-    "DNS")
-        # Enter domain
+    if yesno_box_yes "Do you want to use an unprivileged user for RustDesk?"; then
         while :
         do
-            RUSTDESK_DOMAIN=$(input_box_flow "Please enter your domain, e.g. rustdesk.example.com")
-            DIG=$(dig +short "${RUSTDESK_DOMAIN}" @8.8.8.8)
-            if ! [[ "$RUSTDESK_DOMAIN" =~ ^[a-zA-Z0-9]+([a-zA-Z0-9.-]*[a-zA-Z0-9]+)?$ ]]
-            then
-                msg_box "$RUSTDESK_DOMAIN is an invalid domain/DNS address! Please try again."
+            RUSTDESK_USER=$(input_box_flow "Please enter the name of your non-root user:")
+            if ! id "$RUSTDESK_USER" &>/dev/null; then
+                msg_box "We couldn't find $RUSTDESK_USER on the system, are you sure it's correct?
+Please try again."
             else
                 break
             fi
         done
+    fi
+fi
 
-        # Check if DNS are forwarded correctly
-        if dig +short "$RUSTDESK_DOMAIN" @8.8.8.8 | grep -q "$WANIP4"
-        then
-            print_text_in_color "$IGreen" "DNS seems correct when checking with dig!"
+if [ -n "$RUSTDESK_USER" ] && ! id "$RUSTDESK_USER" &>/dev/null; then
+    die "User '$RUSTDESK_USER' does not exist on this system."
+fi
+
+run_as_rustdesk_user() {
+    if [ -n "$RUSTDESK_USER" ]; then
+        sudo -u "$RUSTDESK_USER" "$@"
+    else
+        "$@"
+    fi
+}
+
+##################################################################################################################
+# Dependencies
+##################################################################################################################
+
+install_linux_package unzip
+install_linux_package tar
+install_linux_package jq || warn "jq could not be installed; falling back to text parsing of the GitHub API response."
+if ! install_linux_package dnsutils; then
+    install_linux_package bind9-utils || install_linux_package bind-utils
+fi
+if [ "$FIREWALL" = "none" ]; then
+    if [ "$PKG_MANAGER" = "apt-get" ]; then
+        install_linux_package ufw && detect_firewall
+    fi
+fi
+
+##################################################################################################################
+# Firewall: open the ports hbbs/hbbr need
+##################################################################################################################
+
+fw_allow tcp 21115-21119
+fw_allow udp 21116
+
+##################################################################################################################
+# Resolve latest release and download assets
+##################################################################################################################
+
+if gh_fetch_latest_release; then
+    RELEASE_TAG=$(gh_release_tag)
+    info "Latest release on ${GITHUB_OWNER}/${GITHUB_REPO}: $RELEASE_TAG"
+else
+    RELEASE_TAG=""
+    warn "No GitHub release found for ${GITHUB_OWNER}/${GITHUB_REPO}; falling back to repository-root assets on branch '${GITHUB_BRANCH}'."
+fi
+
+ASSET_NAME="rustdesk-server-linux-${ARCH_ALIAS}.tar.gz"
+
+if [ ! -d "$RUSTDESK_INSTALL_DIR" ]; then
+    success "Installing RustDesk Server..."
+    mkdir -p "$RUSTDESK_INSTALL_DIR"
+    [ -d "$RUSTDESK_INSTALL_DIR" ] || die "The installation folder $RUSTDESK_INSTALL_DIR could not be created."
+
+    WORKDIR=$(mktemp -d)
+    trap 'rm -rf "$WORKDIR"' EXIT
+
+    if ! fetch_and_verify "$ASSET_NAME" "$WORKDIR/$ASSET_NAME"; then
+        die "Sorry, the installation package ($ASSET_NAME) failed to download or verify. Please try running the installer again."
+    fi
+
+    tar -xf "$WORKDIR/$ASSET_NAME" -C "$WORKDIR"
+    EXTRACTED_DIR="$WORKDIR/${ARCH_ALIAS}"
+    [ -d "$EXTRACTED_DIR" ] || die "Unexpected archive layout: expected directory '${ARCH_ALIAS}' inside $ASSET_NAME."
+
+    mv "$EXTRACTED_DIR/static" "$RUSTDESK_INSTALL_DIR"/
+    mv "$EXTRACTED_DIR/hbbr" /usr/bin/
+    mv "$EXTRACTED_DIR/hbbs" /usr/bin/
+    mv "$EXTRACTED_DIR/rustdesk-utils" /usr/bin/
+    chmod +x /usr/bin/hbbr /usr/bin/hbbs /usr/bin/rustdesk-utils
+
+    if [ -n "$RUSTDESK_USER" ]; then
+        chown -R "$RUSTDESK_USER":"$RUSTDESK_USER" "$RUSTDESK_INSTALL_DIR"
+        chown "$RUSTDESK_USER":"$RUSTDESK_USER" /usr/bin/hbbr /usr/bin/hbbs /usr/bin/rustdesk-utils
+    fi
+
+    [ -n "$RELEASE_TAG" ] && write_installed_version "$RELEASE_TAG"
+
+    rm -rf "$WORKDIR"
+    trap - EXIT
+else
+    success "RustDesk server already installed in $RUSTDESK_INSTALL_DIR."
+fi
+
+##################################################################################################################
+# Log directory
+##################################################################################################################
+
+if [ ! -d "$RUSTDESK_LOG_DIR" ]; then
+    info "Creating $RUSTDESK_LOG_DIR"
+    install -d -m 700 "$RUSTDESK_LOG_DIR"
+    [ -n "$RUSTDESK_USER" ] && chown -R "$RUSTDESK_USER":"$RUSTDESK_USER" "$RUSTDESK_LOG_DIR"
+fi
+
+##################################################################################################################
+# systemd services
+##################################################################################################################
+
+SERVICE_USER="${RUSTDESK_USER:-root}"
+
+write_service_unit() {
+    local name="$1"
+    local bin="$2"
+    local unit_path="/etc/systemd/system/rustdesk-${name}.service"
+    cat > "$unit_path" <<UNIT
+[Unit]
+Description=RustDesk ${name} service
+After=network.target
+
+[Service]
+Type=simple
+LimitNOFILE=1000000
+ExecStart=${bin}
+WorkingDirectory=${RUSTDESK_INSTALL_DIR}
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+Restart=always
+RestartSec=10
+StandardOutput=append:${RUSTDESK_LOG_DIR}/${name}.log
+StandardError=append:${RUSTDESK_LOG_DIR}/${name}.error
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+}
+
+[ -f /etc/systemd/system/rustdesk-hbbs.service ] || write_service_unit hbbs /usr/bin/hbbs
+[ -f /etc/systemd/system/rustdesk-hbbr.service ] || write_service_unit hbbr /usr/bin/hbbr
+
+systemctl daemon-reload
+enable_and_start_service rustdesk-hbbr.service
+enable_and_start_service rustdesk-hbbs.service
+
+if ! wait_for_service_active rustdesk-hbbr.service 60; then
+    die "rustdesk-hbbr.service failed to become active. Check: journalctl -u rustdesk-hbbr.service"
+fi
+
+##################################################################################################################
+# Wait for the keypair to be generated
+##################################################################################################################
+
+PUBKEYNAME=""
+WAITED=0
+while [ -z "$PUBKEYNAME" ]; do
+    PUBKEYNAME=$(find "$RUSTDESK_INSTALL_DIR" -maxdepth 1 -name "*.pub" | head -n1)
+    if [ -z "$PUBKEYNAME" ]; then
+        if [ "$WAITED" -ge 60 ]; then
+            die "Timed out waiting for the RustDesk keypair to be generated. Check: journalctl -u rustdesk-hbbs.service"
+        fi
+        info "Checking if public key is generated... (${WAITED}s/60s)"
+        sleep 5
+        WAITED=$((WAITED + 5))
+    fi
+done
+success "Public key path: $PUBKEYNAME"
+PUBLICKEY=$(cat "$PUBKEYNAME")
+
+##################################################################################################################
+# IP vs Domain (TLS) setup
+##################################################################################################################
+
+if [ "$FORCE_IP_MODE" = "true" ]; then
+    CHOICE="IP"
+elif [ -n "$RUSTDESK_DOMAIN" ]; then
+    CHOICE="DNS"
+elif [ "$NONINTERACTIVE" = "true" ]; then
+    CHOICE="IP"
+else
+    CHOICE=$(whiptail --title "RustDesk installation script" --menu \
+"Choose your preferred option, IP or DNS/Domain:
+
+IP  = You don't want to set up TLS
+DNS = Setup RustDesk with TLS based on Nginx and free TLS certificates from Let's Encrypt
+$MENU_GUIDE
+
+$RUN_LATER_GUIDE" "$WT_HEIGHT" "$WT_WIDTH" 4 \
+"IP" "($WANIP4)" \
+"DNS" "(e.g. rustdesk.example.com)" 3>&1 1>&2 2>&3)
+fi
+
+case "$CHOICE" in
+    "DNS")
+        if [ -z "$RUSTDESK_DOMAIN" ]; then
+            while :
+            do
+                RUSTDESK_DOMAIN=$(input_box_flow "Please enter your domain, e.g. rustdesk.example.com")
+                if ! [[ "$RUSTDESK_DOMAIN" =~ ^[a-zA-Z0-9]+([a-zA-Z0-9.-]*[a-zA-Z0-9]+)?$ ]]; then
+                    msg_box "$RUSTDESK_DOMAIN is an invalid domain/DNS address! Please try again."
+                    RUSTDESK_DOMAIN=""
+                else
+                    break
+                fi
+            done
+        elif ! [[ "$RUSTDESK_DOMAIN" =~ ^[a-zA-Z0-9]+([a-zA-Z0-9.-]*[a-zA-Z0-9]+)?$ ]]; then
+            die "'$RUSTDESK_DOMAIN' is not a valid domain name."
+        fi
+
+        DIG=$(dig +short "${RUSTDESK_DOMAIN}" @8.8.8.8)
+        if echo "$DIG" | grep -q "$WANIP4"; then
+            success "DNS seems correct when checking with dig!"
         else
-        msg_box "DNS lookup failed with dig. The external IP ($WANIP4) \
+            msg_box "DNS lookup failed with dig. The external IP ($WANIP4) \
 address of this server is not the same as the A-record ($DIG).
 Please check your DNS settings! Maybe the domain hasn't propagated?
 Please check https://www.whatsmydns.net/#A/${RUSTDESK_DOMAIN} if the IP seems correct."
-            exit 1
+            die "DNS validation failed for $RUSTDESK_DOMAIN."
         fi
 
-        # Install packages
-        print_text_in_color "$IGreen" "Installing Nginx and Cerbot..."
-        if yesno_box_yes "We use Certbot to generate the free TLS certificate from Let's Encrypt.
-The default behavior of installing Certbot is to use the snap package which auto updates, and provides the latest version of Certbot. If you don't like snap packages, you can opt out now and we'll use regular (old) deb packages instead.
-
-Do you want to install Certbot with snap? (recommended)"
-        then
-            install_linux_package nginx
-            if ! install_linux_package snapd
-            then
-                print_text_in_color "$IRed" "Sorry, snapd wasn't found on your system, using 'python3-certbot-nginx' instead."
-                install_linux_package python3-certbot-nginx
-            else
+        info "Installing Nginx and Certbot..."
+        install_linux_package nginx
+        if [ "$CERTBOT_USE_SNAP" = "true" ]; then
+            if install_linux_package snapd; then
                 snap install certbot --classic
+                CERTBOT_BIN="/snap/bin/certbot"
+            else
+                warn "snapd wasn't found on your system, using distro Certbot package instead."
+                install_linux_package python3-certbot-nginx || install_linux_package certbot
+                CERTBOT_BIN="certbot"
             fi
         else
-            install_linux_package nginx
-            install_linux_package python3-certbot-nginx
+            install_linux_package python3-certbot-nginx || install_linux_package certbot
+            CERTBOT_BIN="certbot"
         fi
 
-        # Add Nginx config
-        if [ -d "/etc/nginx/sites-available" ] && [ -d "/etc/nginx/sites-enabled" ]
-        then
+        if [ -d "/etc/nginx/sites-available" ] && [ -d "/etc/nginx/sites-enabled" ]; then
             SITES_CONF_DIR="sites-available"
-        elif [ -d "/etc/nginx/conf.d" ]
-        then
+        elif [ -d "/etc/nginx/conf.d" ]; then
             SITES_CONF_DIR="conf.d"
         else
-            msg_box "Couldn't find the Nginx config directory. Please check your system!"
-            exit 1
+            die "Couldn't find the Nginx config directory. Please check your system!"
         fi
 
-        if [ ! -f "/etc/nginx/$SITES_CONF_DIR/rustdesk.conf" ]
-        then
-            touch "/etc/nginx/$SITES_CONF_DIR/rustdesk.conf"
-            cat << NGINX_RUSTDESK_CONF > "/etc/nginx/$SITES_CONF_DIR/rustdesk.conf"
+        NGINX_CONF="/etc/nginx/$SITES_CONF_DIR/rustdesk.conf"
+        if [ ! -f "$NGINX_CONF" ]; then
+            cat > "$NGINX_CONF" <<NGINX_RUSTDESK_CONF
 server {
   server_name ${RUSTDESK_DOMAIN};
-      location / {
-           proxy_set_header        X-Real-IP       \$remote_addr;
-           proxy_set_header        X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_pass http://127.0.0.1:21114/;
-      }
+  location / {
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_pass http://127.0.0.1:21114/;
+  }
 }
 NGINX_RUSTDESK_CONF
         fi
 
-        # Enable the Nginx config file
-        if [ "$SITES_CONF_DIR" = "sites-available" ] && [ ! -f /etc/nginx/sites-enabled/rustdesk.conf ]
-        then
+        if [ "$SITES_CONF_DIR" = "sites-available" ] && [ ! -f /etc/nginx/sites-enabled/rustdesk.conf ]; then
             ln -s /etc/nginx/sites-available/rustdesk.conf /etc/nginx/sites-enabled/rustdesk.conf
         fi
 
-        # Enable firewall rules for the domain
-        ufw allow 80/tcp
-        ufw allow 443/tcp
-        ufw --force enable
-        ufw --force reload
+        fw_allow tcp 80
+        fw_allow tcp 443
+        fw_enable
 
-        # Generate the certifictae
-        if ! certbot --nginx --cert-name "${RUSTDESK_DOMAIN}" --key-type ecdsa --renew-by-default --no-eff-email --agree-tos --server https://acme-v02.api.letsencrypt.org/directory -d "${RUSTDESK_DOMAIN}"
-        then
-            msg_box "Sorry, the TLS certificate for $RUSTDESK_DOMAIN failed to generate!
-Please check that port 80/443 are correctly port forwarded, and that the DNS record points to this servers IP.
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx
 
-Please try again."
-            exit
+        if ! "$CERTBOT_BIN" --nginx --cert-name "${RUSTDESK_DOMAIN}" --key-type ecdsa --renew-by-default --no-eff-email --agree-tos --server https://acme-v02.api.letsencrypt.org/directory -d "${RUSTDESK_DOMAIN}"; then
+            die "Sorry, the TLS certificate for $RUSTDESK_DOMAIN failed to generate. Please check that ports 80/443 are correctly forwarded and that the DNS record points to this server's IP, then try again."
         fi
-    ;;
-    "IP")
-        ufw allow 21114/tcp
-        ufw --force enable
-        ufw --force reload
-    ;;
-    *)
-    ;;
+        ;;
+    "IP"|*)
+        fw_allow tcp 21114
+        fw_enable
+        ;;
 esac
 
-# Display final info!
-if [ -n "$RUSTDESK_DOMAIN" ]
-then
-    msg_box "
+##################################################################################################################
+# Final output
+##################################################################################################################
+
+if [ -n "$RUSTDESK_DOMAIN" ] && [ "$CHOICE" = "DNS" ]; then
+    msg_box "Installation complete!
+
 Your Public Key is:
 $PUBLICKEY
+
 Your DNS Address is:
 $RUSTDESK_DOMAIN
 
 Please login at https://$RUSTDESK_DOMAIN
-Default User/Pass: admin/test1234"
+Default User/Pass: admin/test1234
+(change this immediately after first login)"
 else
-    msg_box "
+    msg_box "Installation complete!
+
 Your Public Key is:
 $PUBLICKEY
+
 Your IP Address is:
 $WANIP4
 
 Please login at http://$WANIP4:21114
-Default User/Pass: admin/test1234"
+Default User/Pass: admin/test1234
+(change this immediately after first login)"
 fi
 
-print_text_in_color "$IGreen" "Cleaning up..."
-rm -f rustdesk-server-linux-"${ACTUAL_TAR_NAME}".zip
-rm -rf "${ACTUAL_TAR_NAME}"
+success "RustDesk Server installation finished."
