@@ -4,6 +4,28 @@ This document summarizes the rewrite that removed every dependency on
 the official RustDesk release infrastructure and replaced it with this
 repository as the sole distribution source.
 
+## Update: proprietary binaries removed from the repository
+
+`rustdesk-server-hbbs_1.8.5_amd64.deb`, `rustdesk-server-hbbr_1.8.5_amd64.deb`,
+`rustdesk-server-utils_1.8.5_amd64.deb`, and `rustdesk-server-linux-amd64.tar.gz`
+have been deleted from the repository root. Those were compiled RustDesk
+Server Pro binaries — closed-source, license-gated software requiring a
+paid license validated against `rustdesk.com` (see the
+[Authentication model](README.md#authentication-model) section) — which
+this repository had no rights to redistribute. Removing them does not
+change any script logic: `lib.sh`'s asset resolution already falls back
+gracefully (with a clear error, not a crash) when neither a GitHub
+Release nor a repo-root file can be found. The repository is now
+installer-scripts-only; supplying legitimately-licensed assets (via a
+GitHub Release, or by pointing `GITHUB_OWNER`/`GITHUB_REPO`/`GITHUB_BRANCH`
+elsewhere) is left entirely to whoever deploys this fork.
+
+Note: this removal only affects the current tree going forward. The
+files still exist in this repository's git history (the initial commit)
+since removing them there would require a history rewrite and
+force-push — a much more disruptive operation that wasn't done here
+without being asked for explicitly.
+
 ## Files changed and why
 
 | File | Change |

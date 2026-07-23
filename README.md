@@ -6,6 +6,22 @@ This repository is a self-contained installer for RustDesk Server
 infrastructure — every script downloads its assets from **this**
 repository instead.
 
+> **No binary assets are shipped in this repository.** The RustDesk
+> Server Pro binaries (`.deb` packages and `.tar.gz` archive) that used
+> to sit at the repository root have been removed — they are
+> closed-source, license-gated software (a paid license validated
+> against `rustdesk.com` is required to run them; see
+> [Authentication model](#authentication-model) below) that this
+> repository has no rights to redistribute. Only the installer scripts
+> themselves live here now. To actually install anything, either:
+> - publish a GitHub Release on **your own copy** of these assets,
+>   obtained through your own valid RustDesk Server Pro license, or
+> - point `GITHUB_OWNER`/`GITHUB_REPO`/`GITHUB_BRANCH` at wherever you
+>   legitimately host the assets you're licensed to use.
+>
+> `install.sh`/`update.sh` will fail with a clear error (not silently)
+> if no release and no repo-root asset can be found.
+
 ## What's in here
 
 | File               | Purpose                                                             |
@@ -67,7 +83,9 @@ sudo bash uninstall.sh --non-interactive --purge
 This means the installer keeps working with zero script changes whether
 you publish versioned GitHub Releases or simply keep files committed at
 the repository root — and it starts using a Release the moment you
-publish one.
+publish one. Neither location currently has any assets in this
+repository (see the notice at the top of this file) — you must supply
+your own before `install.sh`/`update.sh` can do anything.
 
 Cutting a new release only requires:
 
