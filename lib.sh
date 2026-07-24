@@ -137,7 +137,7 @@ MENU_GUIDE="Navigate with the [ARROW] keys and confirm by pressing [ENTER]. Canc
 RUN_LATER_GUIDE="You can run this script again later if you change your mind."
 
 msg_box() {
-    [ -n "$2" ] && local SUBTITLE=" - $2"
+    [ -n "${2:-}" ] && local SUBTITLE=" - $2"
     if [ "$NONINTERACTIVE" = "true" ]; then
         info "$1"
         return 0
@@ -148,7 +148,7 @@ msg_box() {
 # yesno_box_yes: defaults to "yes" when non-interactive (unless
 # NONINTERACTIVE_DEFAULT_NO=true is set by the caller for this prompt).
 yesno_box_yes() {
-    [ -n "$2" ] && local SUBTITLE=" - $2"
+    [ -n "${2:-}" ] && local SUBTITLE=" - $2"
     if [ "$NONINTERACTIVE" = "true" ]; then
         [ "${NONINTERACTIVE_DEFAULT_NO:-false}" = "true" ] && return 1
         return 0
@@ -162,7 +162,7 @@ yesno_box_yes() {
 
 # yesno_box_no: defaults to "no" when non-interactive.
 yesno_box_no() {
-    [ -n "$2" ] && local SUBTITLE=" - $2"
+    [ -n "${2:-}" ] && local SUBTITLE=" - $2"
     if [ "$NONINTERACTIVE" = "true" ]; then
         [ "${NONINTERACTIVE_DEFAULT_YES:-false}" = "true" ] && return 0
         return 1
@@ -178,7 +178,7 @@ yesno_box_no() {
 # prompt for, so callers must never rely on this without a pre-set
 # value. It dies loudly instead of hanging on a prompt that can't show.
 input_box() {
-    [ -n "$2" ] && local SUBTITLE=" - $2"
+    [ -n "${2:-}" ] && local SUBTITLE=" - $2"
     if [ "$NONINTERACTIVE" = "true" ]; then
         die "input_box() called in non-interactive mode for '$1'. Pass the required value via a CLI flag or environment variable instead."
     fi
@@ -189,13 +189,14 @@ input_box() {
 
 input_box_flow() {
     local RESULT
+    local SUBTITLE="${2:-}"
     while :
     do
-        RESULT=$(input_box "$1" "$2")
+        RESULT=$(input_box "$1" "$SUBTITLE") || return 1
         if [ -z "$RESULT" ]; then
-            msg_box "Input is empty, please try again." "$2"
-        elif ! yesno_box_yes "Is this correct? $RESULT" "$2"; then
-            msg_box "OK, please try again." "$2"
+            msg_box "Input is empty, please try again." "$SUBTITLE"
+        elif ! yesno_box_yes "Is this correct? $RESULT" "$SUBTITLE"; then
+            msg_box "OK, please try again." "$SUBTITLE"
         else
             break
         fi
