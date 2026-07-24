@@ -336,6 +336,9 @@ update_api() {
     systemctl stop rustdesk-api.service 2>/dev/null
 
     info "Upgrading rustdesk-api..."
+    # Full resources/ tree from source first (i18n, templates, web, public,
+    # version -- InitI18n() etc. panic without it), admin frontend overlaid on top.
+    cp -ar "$workdir/rustdesk-api/resources" "$workdir/rustdesk-api/release/resources"
     mkdir -p "$workdir/rustdesk-api/release/resources/admin"
     cp -ar "$workdir/rustdesk-api-web/dist/." "$workdir/rustdesk-api/release/resources/admin/"
     rm -rf "${RUSTDESK_API_INSTALL_DIR:?}/resources"

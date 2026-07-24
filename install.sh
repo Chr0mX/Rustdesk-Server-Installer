@@ -572,7 +572,11 @@ else
             npm run build
         ) || die "Building rustdesk-api-web failed."
 
-        # Assemble the release layout rustdesk-api's own build.sh produces.
+        # Assemble the release layout rustdesk-api's own build.sh produces:
+        # the full resources/ tree (i18n, templates, web, public, version)
+        # from source first -- InitI18n() etc. panic without it -- then the
+        # built admin frontend is overlaid into resources/admin.
+        cp -ar "$API_WORKDIR/rustdesk-api/resources" "$API_WORKDIR/rustdesk-api/release/resources"
         mkdir -p "$API_WORKDIR/rustdesk-api/release/resources/admin"
         cp -ar "$API_WORKDIR/rustdesk-api-web/dist/." "$API_WORKDIR/rustdesk-api/release/resources/admin/"
         cp -ar "$API_WORKDIR/rustdesk-api/docs" "$API_WORKDIR/rustdesk-api/release/" 2>/dev/null || true
