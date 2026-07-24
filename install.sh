@@ -598,6 +598,7 @@ else
         # Configure conf/config.yaml for this install.
         CONFIG_FILE="$RUSTDESK_API_INSTALL_DIR/conf/config.yaml"
         sed -i \
+            -e "s#^\(lang:\s*\).*#\1\"en\"#" \
             -e "s#^\(\s*id-server:\s*\).*#\1\"${WANIP4}:21116\"#" \
             -e "s#^\(\s*relay-server:\s*\).*#\1\"${WANIP4}:21117\"#" \
             -e "s#^\(\s*api-server:\s*\).*#\1\"${API_SERVER_URL}\"#" \
