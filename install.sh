@@ -6,9 +6,11 @@
 # no dependency on github.com/rustdesk, rustdesk.com, or any closed-
 # source RustDesk Server Pro binary:
 #
-#   - hbbs/hbbr/rustdesk-utils, from lejianwen/rustdesk-server (an
-#     AGPL-3.0 fork of the official rustdesk/rustdesk-server adding the
-#     WebSocket support the web client needs)
+#   - hbbs/hbbr/rustdesk-utils, from Chr0mX/rustdesk-server (an
+#     AGPL-3.0 fork of lejianwen/rustdesk-server, itself a fork of the
+#     official rustdesk/rustdesk-server, adding the WebSocket support the
+#     web client needs plus upstream 1.1.15/1.1.16 fixes lejianwen's fork
+#     hadn't picked up)
 #   - rustdesk-api, the open-source admin API/console backend (built
 #     from source; Go)
 #   - rustdesk-api-web, its frontend (built from source; Vue/Vite)

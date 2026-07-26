@@ -7,7 +7,7 @@ component comes from a genuinely open, freely-licensed project:
 
 | Component | Source | License |
 |---|---|---|
-| hbbs / hbbr / rustdesk-utils | [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server) (a fork of the official `rustdesk/rustdesk-server` adding WebSocket support, a connection-timeout fix, and optional `MUST_LOGIN` enforcement) | AGPL-3.0 |
+| hbbs / hbbr / rustdesk-utils | [Chr0mX/rustdesk-server](https://github.com/Chr0mX/rustdesk-server), a fork of [lejianwen/rustdesk-server](https://github.com/lejianwen/rustdesk-server) (which forks the official `rustdesk/rustdesk-server`, adding WebSocket support, a connection-timeout fix, and optional `MUST_LOGIN` enforcement) with upstream's later 1.1.15/1.1.16 fixes merged back in (notably a UDP punch-hole reflection/amplification fix and an i32-overflow peer-online-state bug) | AGPL-3.0 |
 | rustdesk-api (admin API backend) | [Chr0mX/rustdesk-api](https://github.com/Chr0mX/rustdesk-api), a fork of [lejianwen/rustdesk-api](https://github.com/lejianwen/rustdesk-api) | MIT |
 | rustdesk-api-web (admin console frontend) | [Chr0mX/rustdesk-api-web](https://github.com/Chr0mX/rustdesk-api-web), a fork of [lejianwen/rustdesk-api-web](https://github.com/lejianwen/rustdesk-api-web) | MIT |
 
@@ -103,8 +103,8 @@ sudo bash install.sh \
   --web-owner myorg --web-repo my-rustdesk-api-web-fork --web-branch main
 ```
 
-To use the plain official server instead of `lejianwen`'s fork (loses
-the web client, since the official server has no WebSocket support):
+To use the plain official server instead of this fork (loses the web
+client, since the official server has no WebSocket support):
 
 ```bash
 sudo bash install.sh --hbbs-owner rustdesk --hbbs-repo rustdesk-server
@@ -130,7 +130,7 @@ All flags are also available as environment variables:
 
 | Variable            | CLI flag        | Default                       | Meaning |
 |---------------------|-----------------|--------------------------------|---------|
-| `HBBS_OWNER`         | `--hbbs-owner`  | `lejianwen`                    | hbbs/hbbr release source |
+| `HBBS_OWNER`         | `--hbbs-owner`  | `Chr0mX`                        | hbbs/hbbr release source |
 | `HBBS_REPO`          | `--hbbs-repo`   | `rustdesk-server`               | |
 | `API_OWNER`          | `--api-owner`   | `Chr0mX`                       | rustdesk-api source |
 | `API_REPO`           | `--api-repo`    | `rustdesk-api`                  | |

@@ -23,14 +23,17 @@ GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB_RAW_HOST="${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}"
 
-# hbbs/hbbr binaries: lejianwen/rustdesk-server, an AGPL-3.0 fork of the
-# official rustdesk/rustdesk-server that adds the WebSocket support the
-# web client needs, a connection-timeout fix, and optional MUST_LOGIN
-# enforcement. Set HBBS_OWNER/HBBS_REPO to "rustdesk"/"rustdesk-server"
-# to use the plain official server instead (everything works except the
-# web client, which needs WebSocket support neither the official server
-# nor this fork's install path can add on its own).
-HBBS_OWNER="${HBBS_OWNER:-lejianwen}"
+# hbbs/hbbr binaries: Chr0mX/rustdesk-server, this project's own fork of
+# lejianwen/rustdesk-server (itself a fork of official rustdesk/rustdesk-server)
+# with the WebSocket support the web client needs, a connection-timeout fix,
+# and optional MUST_LOGIN enforcement - plus the upstream 1.1.15/1.1.16
+# fixes lejianwen's fork hadn't picked up (notably a UDP punch-hole
+# reflection/amplification fix and an i32-overflow peer-online-state bug).
+# Set HBBS_OWNER/HBBS_REPO to "rustdesk"/"rustdesk-server" to use the plain
+# official server instead (everything works except the web client, which
+# needs WebSocket support neither the official server nor this fork's
+# install path can add on its own).
+HBBS_OWNER="${HBBS_OWNER:-Chr0mX}"
 HBBS_REPO="${HBBS_REPO:-rustdesk-server}"
 
 # rustdesk-api (Go backend) and rustdesk-api-web (Vue frontend): the

@@ -2,7 +2,7 @@
 #
 # update.sh - Updates an existing RustDesk Server installation
 #
-# Checks the latest hbbs/hbbr release (lejianwen/rustdesk-server by
+# Checks the latest hbbs/hbbr release (Chr0mX/rustdesk-server by
 # default) and the latest rustdesk-api/rustdesk-api-web source commits,
 # and upgrades whichever of the three has moved since the last install/
 # update. Configuration and key files are always preserved. If the
