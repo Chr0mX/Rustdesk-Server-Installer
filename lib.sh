@@ -18,7 +18,7 @@ true
 # The GitHub repository that hosts this fork's installer scripts.
 # Override with env vars if you maintain your own fork.
 GITHUB_OWNER="${GITHUB_OWNER:-Chr0mX}"
-GITHUB_REPO="${GITHUB_REPO:-Rustdesk-Web}"
+GITHUB_REPO="${GITHUB_REPO:-Rustdesk-Server-Installer}"
 GITHUB_BRANCH="${GITHUB_BRANCH:-main}"
 GITHUB_API="${GITHUB_API:-https://api.github.com}"
 GITHUB_RAW_HOST="${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}"

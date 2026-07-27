@@ -92,10 +92,10 @@ _bootstrap_fetch_repo_file() {
     if [ -n "${GITHUB_TOKEN:-}" ]; then
         curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github.raw+json" \
-            "${GITHUB_API:-https://api.github.com}/repos/${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}/contents/${1}?ref=${GITHUB_BRANCH:-main}"
+            "${GITHUB_API:-https://api.github.com}/repos/${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Server-Installer}/contents/${1}?ref=${GITHUB_BRANCH:-main}"
     else
         curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused \
-            "${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}/${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}/${GITHUB_BRANCH:-main}/${1}"
+            "${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}/${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Server-Installer}/${GITHUB_BRANCH:-main}/${1}"
     fi
 }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" >/dev/null 2>&1 && pwd -P)"
@@ -103,7 +103,7 @@ if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/lib.sh" ]; then
     # shellcheck source=lib.sh
     source "$SCRIPT_DIR/lib.sh"
 else
-    LIB_SRC=$(_bootstrap_fetch_repo_file lib.sh) || { echo "FATAL: could not fetch lib.sh from ${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}@${GITHUB_BRANCH:-main}" >&2; exit 1; }
+    LIB_SRC=$(_bootstrap_fetch_repo_file lib.sh) || { echo "FATAL: could not fetch lib.sh from ${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Server-Installer}@${GITHUB_BRANCH:-main}" >&2; exit 1; }
     # shellcheck source=/dev/null
     source <(echo "$LIB_SRC")
 fi
@@ -145,7 +145,7 @@ else
     # install.sh lives at the repo root (not a release asset), so fetch
     # it directly from this fork's own repository.
     TMP_INSTALL=$(mktemp)
-    _bootstrap_fetch_repo_file install.sh > "$TMP_INSTALL" || die "Could not fetch install.sh from ${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Web}@${GITHUB_BRANCH:-main}"
+    _bootstrap_fetch_repo_file install.sh > "$TMP_INSTALL" || die "Could not fetch install.sh from ${GITHUB_OWNER:-Chr0mX}/${GITHUB_REPO:-Rustdesk-Server-Installer}@${GITHUB_BRANCH:-main}"
     INSTALL_CMD=(bash "$TMP_INSTALL" "${INSTALL_ARGS[@]}")
 fi
 

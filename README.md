@@ -28,7 +28,7 @@ fully open stack.
 ## Quick start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Chr0mX/Rustdesk-Web/main/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/Chr0mX/Rustdesk-Server-Installer/main/install.sh -o install.sh
 sudo bash install.sh
 ```
 
@@ -139,7 +139,7 @@ All flags are also available as environment variables:
 | `WEB_REPO`           | `--web-repo`    | `rustdesk-api-web`              | |
 | `WEB_BRANCH`         | `--web-branch`  | `master`                        | |
 | `GITHUB_OWNER`       | `--owner`       | `Chr0mX`                       | Where this installer's own `lib.sh` is fetched from, if not run from a local clone |
-| `GITHUB_REPO`        | `--repo`        | `Rustdesk-Web`                 | |
+| `GITHUB_REPO`        | `--repo`        | `Rustdesk-Server-Installer`    | |
 | `GITHUB_BRANCH`      | `--branch`      | `main`                         | |
 | `GITHUB_TOKEN`       | -               | (unset)                        | Auth token; required for private repos |
 | `NONINTERACTIVE`     | `-y`/`--non-interactive` | `false`                | Disable all whiptail prompts |
