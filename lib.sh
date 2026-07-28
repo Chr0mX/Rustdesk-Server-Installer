@@ -240,9 +240,14 @@ identify_os() {
         # freedesktop.org and systemd
         # shellcheck source=/dev/null
         source /etc/os-release
-        OS="$NAME"
-        VER="$VERSION_ID"
+        # NAME/VERSION_ID/ID_LIKE are all optional per the os-release spec
+        # (e.g. VERSION_ID/ID_LIKE are commonly absent on rolling-release or
+        # minimal images) - default to empty rather than tripping the
+        # `set -u` unbound-variable check. ID is the one mandatory field.
+        OS="${NAME:-}"
+        VER="${VERSION_ID:-}"
         DISTRO_ID="${ID,,}"
+        ID_LIKE="${ID_LIKE:-}"
         UPSTREAM_ID="${ID_LIKE,,}"
 
         if [ "${UPSTREAM_ID}" != "debian" ] && [ "${UPSTREAM_ID}" != "ubuntu" ]; then
