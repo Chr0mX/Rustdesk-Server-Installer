@@ -37,6 +37,8 @@
 #       --skip-api            Only install hbbs/hbbr; skip rustdesk-api
 #                             and rustdesk-api-web (headless server,
 #                             matching the plain open-source project)
+#       --skip-engine         Skip building the Flutter web engine
+#                             (webclient-dev's resources/admin/engine/)
 #       --hbbs-owner <owner>  Override the hbbs/hbbr release source
 #       --hbbs-repo <repo>
 #       --server-branch <branch>  Branch of hbbs-owner/hbbs-repo's source
@@ -49,6 +51,9 @@
 #       --web-owner <owner>   Override the rustdesk-api-web source
 #       --web-repo <repo>
 #       --web-branch <branch>
+#       --flutter-owner <owner>  Override the Flutter web engine source
+#       --flutter-repo <repo>    (Chr0mX/rustdesk's flutter/ subdirectory)
+#       --flutter-branch <branch>
 #       --owner <owner>       Override where THIS installer's own
 #       --repo <repo>         lib.sh is fetched from, if not run from a
 #       --branch <branch>     local clone (rarely needs changing)
@@ -56,9 +61,10 @@
 #   -h, --help                Show this help and exit
 #
 # All options can also be provided via environment variables:
-#   NONINTERACTIVE, RUSTDESK_USER, RUSTDESK_DOMAIN, SKIP_API,
+#   NONINTERACTIVE, RUSTDESK_USER, RUSTDESK_DOMAIN, SKIP_API, SKIP_ENGINE,
 #   HBBS_OWNER, HBBS_REPO, API_OWNER, API_REPO, API_BRANCH,
-#   WEB_OWNER, WEB_REPO, WEB_BRANCH, GITHUB_OWNER, GITHUB_REPO,
+#   WEB_OWNER, WEB_REPO, WEB_BRANCH, FLUTTER_ENGINE_OWNER,
+#   FLUTTER_ENGINE_REPO, FLUTTER_ENGINE_BRANCH, GITHUB_OWNER, GITHUB_REPO,
 #   GITHUB_BRANCH, CERTBOT_USE_SNAP
 
 set -uo pipefail
@@ -72,9 +78,10 @@ RUSTDESK_USER="${RUSTDESK_USER:-}"
 FORCE_IP_MODE="false"
 CERTBOT_USE_SNAP="${CERTBOT_USE_SNAP:-true}"
 SKIP_API="${SKIP_API:-false}"
+SKIP_ENGINE="${SKIP_ENGINE:-false}"
 
 print_usage() {
-    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//' | sed -n '2,45p'
+    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//' | sed -n '2,68p'
 }
 
 while [ $# -gt 0 ]; do
@@ -93,6 +100,9 @@ while [ $# -gt 0 ]; do
             ;;
         --skip-api)
             SKIP_API="true"
+            ;;
+        --skip-engine)
+            SKIP_ENGINE="true"
             ;;
         --hbbs-owner)
             HBBS_OWNER="$2"; shift
@@ -121,6 +131,15 @@ while [ $# -gt 0 ]; do
         --web-branch)
             WEB_BRANCH="$2"; shift
             ;;
+        --flutter-owner)
+            FLUTTER_ENGINE_OWNER="$2"; shift
+            ;;
+        --flutter-repo)
+            FLUTTER_ENGINE_REPO="$2"; shift
+            ;;
+        --flutter-branch)
+            FLUTTER_ENGINE_BRANCH="$2"; shift
+            ;;
         --owner)
             GITHUB_OWNER="$2"; shift
             ;;
@@ -147,9 +166,10 @@ while [ $# -gt 0 ]; do
 done
 
 export NONINTERACTIVE="${NONINTERACTIVE:-false}"
-export RUSTDESK_USER RUSTDESK_DOMAIN CERTBOT_USE_SNAP SKIP_API
+export RUSTDESK_USER RUSTDESK_DOMAIN CERTBOT_USE_SNAP SKIP_API SKIP_ENGINE
 export GITHUB_OWNER GITHUB_REPO GITHUB_BRANCH
 export HBBS_OWNER HBBS_REPO SERVER_BRANCH API_OWNER API_REPO API_BRANCH WEB_OWNER WEB_REPO WEB_BRANCH
+export FLUTTER_ENGINE_OWNER FLUTTER_ENGINE_REPO FLUTTER_ENGINE_BRANCH
 
 ##################################################################################################################
 # Bootstrap: minimal deps + source lib.sh from this fork's own repository
@@ -580,8 +600,18 @@ else
 
     API_SHA=$(gh_branch_sha "$API_OWNER" "$API_REPO" "$API_BRANCH") || die "Could not resolve ${API_OWNER}/${API_REPO}@${API_BRANCH}."
     WEB_SHA=$(gh_branch_sha "$WEB_OWNER" "$WEB_REPO" "$WEB_BRANCH") || die "Could not resolve ${WEB_OWNER}/${WEB_REPO}@${WEB_BRANCH}."
+    ENGINE_SHA=""
+    if [ "$SKIP_ENGINE" != "true" ]; then
+        ENGINE_SHA=$(gh_branch_sha "$FLUTTER_ENGINE_OWNER" "$FLUTTER_ENGINE_REPO" "$FLUTTER_ENGINE_BRANCH") \
+            || die "Could not resolve ${FLUTTER_ENGINE_OWNER}/${FLUTTER_ENGINE_REPO}@${FLUTTER_ENGINE_BRANCH}."
+    fi
 
-    if [ ! -d "$RUSTDESK_API_INSTALL_DIR" ] || [ "$(read_installed_version api)" != "$API_SHA" ] || [ "$(read_installed_version web)" != "$WEB_SHA" ]; then
+    ENGINE_NEEDS_BUILD="false"
+    if [ "$SKIP_ENGINE" != "true" ] && [ "$(read_installed_version engine)" != "$ENGINE_SHA" ]; then
+        ENGINE_NEEDS_BUILD="true"
+    fi
+
+    if [ ! -d "$RUSTDESK_API_INSTALL_DIR" ] || [ "$(read_installed_version api)" != "$API_SHA" ] || [ "$(read_installed_version web)" != "$WEB_SHA" ] || [ "$ENGINE_NEEDS_BUILD" = "true" ]; then
         success "Building rustdesk-api (${API_OWNER}/${API_REPO}@${API_BRANCH})..."
         fetch_source_tarball "$API_OWNER" "$API_REPO" "$API_BRANCH" "$API_WORKDIR/rustdesk-api" \
             || die "Could not fetch rustdesk-api source from ${API_OWNER}/${API_REPO}@${API_BRANCH}."
@@ -614,6 +644,23 @@ else
         cp -ar "$API_WORKDIR/rustdesk-api/resources" "$API_WORKDIR/rustdesk-api/release/resources"
         mkdir -p "$API_WORKDIR/rustdesk-api/release/resources/admin"
         cp -ar "$API_WORKDIR/rustdesk-api-web/dist/." "$API_WORKDIR/rustdesk-api/release/resources/admin/"
+
+        # The Flutter web engine (docs/WEBCLIENT_V2_REBUILD_PLAN.md's Phase
+        # 2) is Engine.vue's resources/admin/engine/ - an entirely separate
+        # source tree/SDK from rustdesk-api-web above (Chr0mX/rustdesk's
+        # flutter/ subdirectory, not this fork's own Vue/Vite build). Built
+        # after the release/resources/admin tree above already exists
+        # (build_flutter_engine's own mkdir -p would otherwise conflict
+        # with the cp -ar that creates release/resources from source).
+        # Building straight into the release tree here, before it's copied
+        # into place below, means a fresh install needs no separate
+        # preserve-across-swap dance the way update.sh's repeat runs do.
+        if [ "$ENGINE_NEEDS_BUILD" = "true" ]; then
+            success "Building the Flutter web engine (${FLUTTER_ENGINE_OWNER}/${FLUTTER_ENGINE_REPO}@${FLUTTER_ENGINE_BRANCH})..."
+            build_flutter_engine "$API_WORKDIR/flutter-engine" "$API_WORKDIR/rustdesk-api/release/resources/admin/engine" \
+                || die "Building the Flutter web engine failed."
+        fi
+
         cp -ar "$API_WORKDIR/rustdesk-api/docs" "$API_WORKDIR/rustdesk-api/release/" 2>/dev/null || true
         mkdir -p "$API_WORKDIR/rustdesk-api/release/conf" "$API_WORKDIR/rustdesk-api/release/data" "$API_WORKDIR/rustdesk-api/release/runtime"
         cp -n "$API_WORKDIR/rustdesk-api/conf/config.yaml" "$API_WORKDIR/rustdesk-api/release/conf/config.yaml" 2>/dev/null || true
@@ -659,6 +706,9 @@ else
 
         write_installed_version api "$API_SHA"
         write_installed_version web "$WEB_SHA"
+        if [ "$ENGINE_NEEDS_BUILD" = "true" ]; then
+            write_installed_version engine "$ENGINE_SHA"
+        fi
     else
         success "rustdesk-api/rustdesk-api-web already built and up to date."
     fi
