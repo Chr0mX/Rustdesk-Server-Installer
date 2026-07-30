@@ -917,7 +917,18 @@ build_flutter_engine() {
     if ! (
         cd "$workdir/flutter" || exit 1
         flutter pub get
-        flutter build web --release --base-href "$ENGINE_BASE_HREF"
+        # --no-tree-shake-icons: without it, flutter build web only keeps
+        # glyphs for IconData it can prove are referenced via static
+        # analysis - confirmed live to miss some (build warned "Expected
+        # to find fonts for (..., gestureicons,
+        # packages/cupertino_icons/CupertinoIcons), but found (...)"),
+        # presumably from IconData built dynamically somewhere in this
+        # recovered app rather than as static const references the
+        # tree-shaker can see. Auditing every such reference in a
+        # decompiled/recovered codebase isn't practical - bundling every
+        # icon glyph unconditionally trades a larger (but still modest)
+        # font asset for guaranteed-correct icon rendering instead.
+        flutter build web --release --base-href "$ENGINE_BASE_HREF" --no-tree-shake-icons
     ); then
         error "Building the Flutter web engine failed."
         return 1
