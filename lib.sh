@@ -1060,6 +1060,7 @@ ensure_flutter() {
     # version detection (git describe fails, reports "0.0.0-unknown") and
     # cascades into `flutter pub get` rejecting every SDK-versioned
     # dependency (also confirmed live).
+    info "Extracting Flutter SDK (single-threaded xz decompression of a ~1GB archive - can take a few minutes on a modest CPU)..."
     extract_tmp=$(mktemp -d)
     tar --no-same-owner -xJf "$tmp" -C "$extract_tmp"
     mv "$extract_tmp/flutter" "$FLUTTER_SDK_DIR"
@@ -1074,8 +1075,15 @@ ensure_flutter() {
     git config --global --add safe.directory "$FLUTTER_SDK_DIR"
     export PATH="$FLUTTER_SDK_DIR/bin:$PATH"
     command -v flutter &>/dev/null || die "Flutter SDK installation appears to have failed."
-    flutter config --no-analytics &>/dev/null || true
-    flutter precache --web &>/dev/null || true
+    # Neither of these was ever silenced for a good reason - &>/dev/null
+    # here just meant several more minutes of total silence during
+    # exactly the phase a user is most likely to assume something hung
+    # (confirmed live: 100% CPU, zero output, right after the download's
+    # own progress bar finished). Letting their real output through costs
+    # nothing and removes the ambiguity.
+    flutter config --no-analytics || true
+    info "Precaching Flutter web artifacts (first run only - can also take a few minutes)..."
+    flutter precache --web || true
     success "Installed Flutter $(flutter --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
 }
 
