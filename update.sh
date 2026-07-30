@@ -343,6 +343,18 @@ update_api() {
     systemctl stop rustdesk-api.service 2>/dev/null
 
     info "Upgrading rustdesk-api..."
+    # Phase 2's flutter build web output (docs/WEBCLIENT_V2_REBUILD_PLAN.md)
+    # isn't produced by this script - it's a manual `flutter build web`
+    # elsewhere, copied by hand into resources/admin/engine/. Not part of
+    # any source tree this function fetches, so it'd otherwise be silently
+    # deleted by the rm -rf below on every single update.sh run. Preserve
+    # it across the resources swap the same way conf/data/runtime already
+    # are elsewhere in this script.
+    local engine_backup=""
+    if [ -d "$RUSTDESK_API_INSTALL_DIR/resources/admin/engine" ]; then
+        engine_backup=$(mktemp -d)
+        cp -a "$RUSTDESK_API_INSTALL_DIR/resources/admin/engine" "$engine_backup/engine"
+    fi
     # Full resources/ tree from source first (i18n, templates, web, public,
     # version -- InitI18n() etc. panic without it), admin frontend overlaid on top.
     cp -ar "$workdir/rustdesk-api/resources" "$workdir/rustdesk-api/release/resources"
@@ -350,6 +362,10 @@ update_api() {
     cp -ar "$workdir/rustdesk-api-web/dist/." "$workdir/rustdesk-api/release/resources/admin/"
     rm -rf "${RUSTDESK_API_INSTALL_DIR:?}/resources"
     cp -ar "$workdir/rustdesk-api/release/resources" "$RUSTDESK_API_INSTALL_DIR/resources"
+    if [ -n "$engine_backup" ]; then
+        cp -a "$engine_backup/engine" "$RUSTDESK_API_INSTALL_DIR/resources/admin/engine"
+        rm -rf "$engine_backup"
+    fi
     mv "$workdir/rustdesk-api/release/apimain" /usr/bin/rustdesk-api
     chmod +x /usr/bin/rustdesk-api
 
