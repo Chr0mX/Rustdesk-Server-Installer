@@ -1029,16 +1029,41 @@ ensure_flutter() {
     [ -n "$flutterarch" ] || die "No Flutter SDK build available for architecture $ARCH (Flutter only publishes a Linux SDK for x64)."
 
     info "Installing Flutter SDK ${FLUTTER_SDK_VERSION}..."
-    local tmp
+    local tmp extract_tmp
     tmp=$(mktemp)
     retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused \
         -o "$tmp" "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_SDK_VERSION}-stable.tar.xz" \
         || die "Failed to download the Flutter SDK."
     rm -rf "$FLUTTER_SDK_DIR"
     mkdir -p "$(dirname "$FLUTTER_SDK_DIR")"
-    tar -xJf "$tmp" -C "$(dirname "$FLUTTER_SDK_DIR")"
-    mv "$(dirname "$FLUTTER_SDK_DIR")/flutter" "$FLUTTER_SDK_DIR"
+    # Extract into a scratch dir first, then move the archive's top-level
+    # "flutter" dir into place - extracting straight into
+    # dirname("$FLUTTER_SDK_DIR") and mv-ing from there breaks whenever
+    # FLUTTER_SDK_DIR's own basename is "flutter" (the default,
+    # /usr/local/lib/flutter): the extracted dir would already BE the
+    # final path, and `mv` treats an existing-directory destination as
+    # "move into", not "rename to" - producing
+    # .../flutter/flutter and failing with "cannot move ... to a
+    # subdirectory of itself" (confirmed live). --no-same-owner matters
+    # too: as root, tar otherwise restores the archive's baked-in owner
+    # UID (not necessarily root) onto the extracted .git - Flutter's SDK
+    # checkout is a real git repo, and git's ownership check then refuses
+    # to touch it ("dubious ownership"), which breaks `flutter`'s own
+    # version detection (git describe fails, reports "0.0.0-unknown") and
+    # cascades into `flutter pub get` rejecting every SDK-versioned
+    # dependency (also confirmed live).
+    extract_tmp=$(mktemp -d)
+    tar --no-same-owner -xJf "$tmp" -C "$extract_tmp"
+    mv "$extract_tmp/flutter" "$FLUTTER_SDK_DIR"
+    rm -rf "$extract_tmp"
     rm -f "$tmp"
+    # Belt and suspenders alongside --no-same-owner above - explicitly
+    # trust the SDK's own repo regardless of what ownership it actually
+    # ended up with, since this is a Flutter SDK checkout install.sh/
+    # update.sh manage themselves (not a directory an untrusted party
+    # could substitute), so the risk safe.directory guards against
+    # doesn't apply here.
+    git config --global --add safe.directory "$FLUTTER_SDK_DIR"
     export PATH="$FLUTTER_SDK_DIR/bin:$PATH"
     command -v flutter &>/dev/null || die "Flutter SDK installation appears to have failed."
     flutter config --no-analytics &>/dev/null || true
