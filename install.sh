@@ -511,6 +511,31 @@ server {
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
     proxy_pass http://127.0.0.1:21114/;
   }
+
+  # hbbs's own websocket ports (21118 id, 21119 relay - its base port
+  # +2/+3), reached via a fixed path instead of forwarding whatever port
+  # the browser asked for. This is what the webclient (both the legacy
+  # bundle and rustdesk-api-web's from-source rebuild) actually connects
+  # to for a domain-name server: hbbs speaks plain ws:// and has no TLS
+  # of its own, so a page loaded over https (which requires wss://, a
+  # plain ws:// socket throws SecurityError) has nowhere else to
+  # terminate TLS except here, alongside the domain's own cert.
+  location /ws/id {
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_pass http://127.0.0.1:21118/;
+  }
+  location /ws/relay {
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_pass http://127.0.0.1:21119/;
+  }
 }
 NGINX_RUSTDESK_CONF
         fi
@@ -605,12 +630,25 @@ else
         mv "$API_WORKDIR/rustdesk-api/release/apimain" /usr/bin/rustdesk-api
         chmod +x /usr/bin/rustdesk-api
 
-        # Configure conf/config.yaml for this install.
+        # Configure conf/config.yaml for this install. In domain/TLS mode,
+        # the webclient (both the legacy bundle and rustdesk-api-web's
+        # rebuild) resolves a bare domain to a fixed /ws/id or /ws/relay
+        # path with no port at all - see the /ws/id and /ws/relay nginx
+        # locations set up above - so id-server/relay-server need to be
+        # the domain itself, not WANIP4:port (which the desktop/mobile
+        # clients still connect to directly, unaffected by this - they
+        # don't go through nginx or nginx's websocket proxy at all).
+        ID_SERVER_VALUE="${WANIP4}:21116"
+        RELAY_SERVER_VALUE="${WANIP4}:21117"
+        if [ -n "$RUSTDESK_DOMAIN" ]; then
+            ID_SERVER_VALUE="$RUSTDESK_DOMAIN"
+            RELAY_SERVER_VALUE="$RUSTDESK_DOMAIN"
+        fi
         CONFIG_FILE="$RUSTDESK_API_INSTALL_DIR/conf/config.yaml"
         sed -i \
             -e "s#^\(lang:\s*\).*#\1\"en\"#" \
-            -e "s#^\(\s*id-server:\s*\).*#\1\"${WANIP4}:21116\"#" \
-            -e "s#^\(\s*relay-server:\s*\).*#\1\"${WANIP4}:21117\"#" \
+            -e "s#^\(\s*id-server:\s*\).*#\1\"${ID_SERVER_VALUE}\"#" \
+            -e "s#^\(\s*relay-server:\s*\).*#\1\"${RELAY_SERVER_VALUE}\"#" \
             -e "s#^\(\s*api-server:\s*\).*#\1\"${API_SERVER_URL}\"#" \
             -e "s#^\(\s*key-file:\s*\).*#\1\"${RUSTDESK_INSTALL_DIR}/id_ed25519.pub\"#" \
             "$CONFIG_FILE"
