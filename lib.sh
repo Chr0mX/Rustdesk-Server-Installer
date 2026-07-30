@@ -1039,9 +1039,20 @@ ensure_flutter() {
     # caps how long a genuinely stalled connection (as opposed to just a
     # slow one) is allowed to hang before failing, so retry can actually
     # kick in rather than waiting forever.
+    # Every failure path below explicitly cleans up $tmp/$extract_tmp
+    # before die()-ing, rather than relying on a trap - die() calls exit
+    # directly, which a RETURN trap wouldn't catch, and an EXIT trap here
+    # would clobber whatever EXIT trap the caller already has set (e.g.
+    # install.sh's own `trap 'rm -rf "$API_WORKDIR"' EXIT`, which doesn't
+    # know about these files at all since they're created here, not under
+    # $API_WORKDIR). Confirmed live: repeated failed attempts left several
+    # ~1GB tarballs (and their partially-extracted, several-GB-larger SDK
+    # trees) sitting in /tmp, which is exactly the kind of thing that can
+    # exhaust a small VPS's disk/memory badly enough to make even a new
+    # SSH connection fail.
     retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fL --progress-bar --retry-connrefused --max-time 900 \
         -o "$tmp" "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_SDK_VERSION}-stable.tar.xz" \
-        || die "Failed to download the Flutter SDK."
+        || { rm -f "$tmp"; die "Failed to download the Flutter SDK."; }
     rm -rf "$FLUTTER_SDK_DIR"
     mkdir -p "$(dirname "$FLUTTER_SDK_DIR")"
     # Extract into a scratch dir first, then move the archive's top-level
@@ -1062,10 +1073,17 @@ ensure_flutter() {
     # dependency (also confirmed live).
     info "Extracting Flutter SDK (single-threaded xz decompression of a ~1GB archive - can take a few minutes on a modest CPU)..."
     extract_tmp=$(mktemp -d)
-    tar --no-same-owner -xJf "$tmp" -C "$extract_tmp"
-    mv "$extract_tmp/flutter" "$FLUTTER_SDK_DIR"
-    rm -rf "$extract_tmp"
+    if ! tar --no-same-owner -xJf "$tmp" -C "$extract_tmp"; then
+        rm -f "$tmp"
+        rm -rf "$extract_tmp"
+        die "Failed to extract the Flutter SDK archive."
+    fi
     rm -f "$tmp"
+    if ! mv "$extract_tmp/flutter" "$FLUTTER_SDK_DIR"; then
+        rm -rf "$extract_tmp"
+        die "Failed to install the extracted Flutter SDK into place."
+    fi
+    rm -rf "$extract_tmp"
     # Belt and suspenders alongside --no-same-owner above - explicitly
     # trust the SDK's own repo regardless of what ownership it actually
     # ended up with, since this is a Flutter SDK checkout install.sh/
