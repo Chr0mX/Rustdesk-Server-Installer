@@ -39,6 +39,10 @@
 #                             matching the plain open-source project)
 #       --hbbs-owner <owner>  Override the hbbs/hbbr release source
 #       --hbbs-repo <repo>
+#       --server-branch <branch>  Branch of hbbs-owner/hbbs-repo's source
+#                             tree to pull libs/hbb_common/*.proto from
+#                             when generating rustdesk-api-web's webclient
+#                             protobuf bindings (default: master)
 #       --api-owner <owner>   Override the rustdesk-api source
 #       --api-repo <repo>
 #       --api-branch <branch>
@@ -96,6 +100,9 @@ while [ $# -gt 0 ]; do
         --hbbs-repo)
             HBBS_REPO="$2"; shift
             ;;
+        --server-branch)
+            SERVER_BRANCH="$2"; shift
+            ;;
         --api-owner)
             API_OWNER="$2"; shift
             ;;
@@ -142,7 +149,7 @@ done
 export NONINTERACTIVE="${NONINTERACTIVE:-false}"
 export RUSTDESK_USER RUSTDESK_DOMAIN CERTBOT_USE_SNAP SKIP_API
 export GITHUB_OWNER GITHUB_REPO GITHUB_BRANCH
-export HBBS_OWNER HBBS_REPO API_OWNER API_REPO API_BRANCH WEB_OWNER WEB_REPO WEB_BRANCH
+export HBBS_OWNER HBBS_REPO SERVER_BRANCH API_OWNER API_REPO API_BRANCH WEB_OWNER WEB_REPO WEB_BRANCH
 
 ##################################################################################################################
 # Bootstrap: minimal deps + source lib.sh from this fork's own repository
@@ -571,6 +578,7 @@ else
         (
             cd "$API_WORKDIR/rustdesk-api-web" || exit 1
             npm install
+            generate_webclient_protobuf "$API_WORKDIR/rustdesk-api-web"
             npm run build
         ) || die "Building rustdesk-api-web failed."
 
