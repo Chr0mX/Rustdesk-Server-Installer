@@ -1075,15 +1075,18 @@ ensure_flutter() {
     git config --global --add safe.directory "$FLUTTER_SDK_DIR"
     export PATH="$FLUTTER_SDK_DIR/bin:$PATH"
     command -v flutter &>/dev/null || die "Flutter SDK installation appears to have failed."
-    # Neither of these was ever silenced for a good reason - &>/dev/null
-    # here just meant several more minutes of total silence during
-    # exactly the phase a user is most likely to assume something hung
-    # (confirmed live: 100% CPU, zero output, right after the download's
-    # own progress bar finished). Letting their real output through costs
-    # nothing and removes the ambiguity.
+    # Matches the manual install steps verified working on this project's
+    # own production server: `flutter config --enable-web`, nothing else -
+    # no separate `flutter precache --web`. That command fetches Dart/web
+    # SDK artifacts over the network with no progress output and no
+    # timeout of its own (unlike the SDK download above, which now has
+    # both) - confirmed live as the actual hang, not the extraction step.
+    # `flutter build web` (build_flutter_engine, below) fetches whatever
+    # artifacts it actually needs on its own the same way the verified
+    # manual `flutter build web --release` did, with its own output
+    # visible (not redirected), instead of front-loading it here blind.
     flutter config --no-analytics || true
-    info "Precaching Flutter web artifacts (first run only - can also take a few minutes)..."
-    flutter precache --web || true
+    flutter config --enable-web || true
     success "Installed Flutter $(flutter --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
 }
 
