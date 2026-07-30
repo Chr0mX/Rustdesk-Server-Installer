@@ -53,6 +53,29 @@ WEB_OWNER="${WEB_OWNER:-Chr0mX}"
 WEB_REPO="${WEB_REPO:-rustdesk-api-web}"
 WEB_BRANCH="${WEB_BRANCH:-master}"
 
+# rustdesk-api-web's webclient (src/webclient) embeds a recovered Flutter
+# web engine (see docs/WEBCLIENT_V2_REBUILD_PLAN.md) instead of running
+# standalone - Engine.vue loads its main.dart.js straight from
+# resources/admin/engine/. That engine build is source-tree'd separately
+# from rustdesk-api-web itself: it's Chr0mX/rustdesk's recovered v1
+# flutter/ directory, a branch of the *client* repo, not the API/web
+# console forks above. Only the flutter/ subdirectory is ever fetched
+# (see fetch_source_subdir_sparse) - the rest of that repo (Rust core,
+# Android/iOS/Windows/macOS toolchains) is neither needed nor small.
+FLUTTER_ENGINE_OWNER="${FLUTTER_ENGINE_OWNER:-Chr0mX}"
+FLUTTER_ENGINE_REPO="${FLUTTER_ENGINE_REPO:-rustdesk}"
+FLUTTER_ENGINE_BRANCH="${FLUTTER_ENGINE_BRANCH:-claude/recover-flutter-web}"
+FLUTTER_ENGINE_SUBDIR="${FLUTTER_ENGINE_SUBDIR:-flutter}"
+
+# --base-href baked into the engine's own (unused) generated index.html -
+# harmless either way since Engine.vue resolves assets via a runtime
+# document.baseURI <base> tag instead (see its own comments), but kept
+# accurate/consistent with how it's actually served. Matches
+# rustdesk-api-web's own VITE_ENGINE_BASE_URL (.env.production) for the
+# current /webclient-dev/ preview route - update both together if/when
+# Phase 6 (Cutover) repoints the webclient at /webclient/ instead.
+ENGINE_BASE_HREF="${ENGINE_BASE_HREF:-/webclient-dev/engine/}"
+
 # Optional token used for all GitHub API/download requests. Not needed
 # against a public repository beyond raising the API rate limit
 # (unauthenticated requests are capped at 60/hour), but required if
@@ -446,6 +469,16 @@ node_arch_alias() {
     esac
 }
 
+# flutter_arch_alias: naming used by Flutter's storage.googleapis.com SDK
+# archives, for ensure_flutter. Flutter only ever publishes a Linux SDK
+# for x64 - no official arm64/armv7 Linux archive exists.
+flutter_arch_alias() {
+    case "$ARCH_ALIAS" in
+        amd64) echo "x64" ;;
+        *) echo "" ;;
+    esac
+}
+
 # protoc_arch_alias: naming used by protocolbuffers/protobuf's GitHub
 # release assets, for ensure_protoc. No official armv7 build exists.
 protoc_arch_alias() {
@@ -806,6 +839,95 @@ fetch_source_tarball() {
     rm -rf "$tmp_extract"
 }
 
+# fetch_source_subdir_sparse <owner> <repo> <ref> <subdir> <dest-dir>
+# Fetches just <subdir> of a repository at <ref> (branch) into <dest-dir>
+# (replaced if it already exists) - unlike fetch_source_tarball's GitHub
+# tarball API, which always downloads the *entire* repository regardless
+# of what's actually needed. Used for FLUTTER_ENGINE_* (Chr0mX/rustdesk is
+# a full multi-platform client - Rust core, Android/iOS/Windows/macOS -
+# and only flutter/ is relevant here).
+#
+# A shallow, blobless partial clone (--depth 1 --filter=blob:none)
+# combined with a cone-mode sparse-checkout limited to <subdir> means git
+# only ever fetches blob contents for files under that path - the rest of
+# the repository's tree/commit metadata is fetched (unavoidable with any
+# clone), but not its file contents.
+fetch_source_subdir_sparse() {
+    local owner="$1" repo="$2" ref="$3" subdir="$4" dest_dir="$5"
+    local tmp_clone
+    tmp_clone=$(mktemp -d)
+
+    if ! git clone --quiet --depth 1 --filter=blob:none --no-checkout --branch "$ref" \
+        "https://github.com/${owner}/${repo}.git" "$tmp_clone" 2>/dev/null; then
+        rm -rf "$tmp_clone"
+        error "Failed to fetch ${owner}/${repo}@${ref}."
+        return 1
+    fi
+
+    if ! (
+        cd "$tmp_clone" || exit 1
+        git sparse-checkout init --cone
+        git sparse-checkout set "$subdir"
+        git checkout --quiet "$ref"
+    ); then
+        rm -rf "$tmp_clone"
+        error "Failed to sparse-checkout ${subdir} from ${owner}/${repo}@${ref}."
+        return 1
+    fi
+
+    if [ ! -d "$tmp_clone/$subdir" ]; then
+        rm -rf "$tmp_clone"
+        error "${subdir} not found in ${owner}/${repo}@${ref}."
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$dest_dir")"
+    rm -rf "$dest_dir"
+    mv "$tmp_clone/$subdir" "$dest_dir"
+    rm -rf "$tmp_clone"
+}
+
+# build_flutter_engine <workdir> <dest-dir>
+# Fetches Chr0mX/rustdesk's recovered flutter/ subtree (sparse - see
+# fetch_source_subdir_sparse above) at FLUTTER_ENGINE_BRANCH, builds it
+# with `flutter build web`, and installs the result into <dest-dir>
+# (replaced if it already exists) - this is Engine.vue's
+# resources/admin/engine/ (see docs/WEBCLIENT_V2_REBUILD_PLAN.md's Phase
+# 2/3), which rustdesk-api-web's own build (generate_webclient_protobuf,
+# npm run build) doesn't produce - it's an entirely separate repo/SDK.
+#
+# Note: unlike some of this file's other build helpers, failures here
+# return 1 rather than calling die() directly (ensure_flutter is the one
+# exception - an environment that can't get a working Flutter SDK at all
+# isn't something a caller-side rollback can do anything about, matching
+# ensure_go/ensure_node's own behavior). Callers (install.sh/update.sh)
+# have a previous engine build worth rolling back to on failure, so they
+# need the chance to do that before the script exits.
+build_flutter_engine() {
+    local workdir="$1" dest_dir="$2"
+
+    ensure_flutter
+
+    if ! fetch_source_subdir_sparse "$FLUTTER_ENGINE_OWNER" "$FLUTTER_ENGINE_REPO" "$FLUTTER_ENGINE_BRANCH" \
+        "$FLUTTER_ENGINE_SUBDIR" "$workdir/flutter"; then
+        error "Could not fetch ${FLUTTER_ENGINE_SUBDIR}/ from ${FLUTTER_ENGINE_OWNER}/${FLUTTER_ENGINE_REPO}@${FLUTTER_ENGINE_BRANCH}."
+        return 1
+    fi
+
+    if ! (
+        cd "$workdir/flutter" || exit 1
+        flutter pub get
+        flutter build web --release --base-href "$ENGINE_BASE_HREF"
+    ); then
+        error "Building the Flutter web engine failed."
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$dest_dir")"
+    rm -rf "$dest_dir"
+    cp -ar "$workdir/flutter/build/web" "$dest_dir"
+}
+
 # ensure_go <min-minor-version>
 # Ensures a Go toolchain >= 1.<min-minor-version> is on PATH, installing
 # a pinned fallback version from go.dev if the distro's own Go package
@@ -879,6 +1001,49 @@ ensure_node() {
     export PATH="/usr/local/lib/nodejs/bin:$PATH"
     command -v node &>/dev/null || die "Node.js installation appears to have failed."
     success "Installed Node.js $(node -v), npm $(npm -v)"
+}
+
+# ensure_flutter
+# Ensures the pinned Flutter SDK version is on PATH, installing it from
+# Google's own storage if missing or a different version. Unlike
+# ensure_go/ensure_node's "newer is fine" check, this pins an exact
+# version rather than accepting anything newer - Flutter web builds (and
+# this project's recovered flutter/ source, see FLUTTER_ENGINE_BRANCH) are
+# sensitive enough to SDK version drift that "newer" isn't a safe
+# assumption the way it is for Go/Node.
+FLUTTER_SDK_VERSION="${FLUTTER_SDK_VERSION:-3.24.5}"
+FLUTTER_SDK_DIR="${FLUTTER_SDK_DIR:-/usr/local/lib/flutter}"
+ensure_flutter() {
+    if command -v flutter &>/dev/null; then
+        local ver
+        ver=$(flutter --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+        if [ "$ver" = "$FLUTTER_SDK_VERSION" ]; then
+            info "Using existing Flutter SDK: $ver"
+            return 0
+        fi
+        warn "Installed Flutter SDK (${ver:-unknown}) doesn't match the pinned ${FLUTTER_SDK_VERSION}; installing that version instead."
+    fi
+
+    local flutterarch
+    flutterarch=$(flutter_arch_alias)
+    [ -n "$flutterarch" ] || die "No Flutter SDK build available for architecture $ARCH (Flutter only publishes a Linux SDK for x64)."
+
+    info "Installing Flutter SDK ${FLUTTER_SDK_VERSION}..."
+    local tmp
+    tmp=$(mktemp)
+    retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused \
+        -o "$tmp" "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_SDK_VERSION}-stable.tar.xz" \
+        || die "Failed to download the Flutter SDK."
+    rm -rf "$FLUTTER_SDK_DIR"
+    mkdir -p "$(dirname "$FLUTTER_SDK_DIR")"
+    tar -xJf "$tmp" -C "$(dirname "$FLUTTER_SDK_DIR")"
+    mv "$(dirname "$FLUTTER_SDK_DIR")/flutter" "$FLUTTER_SDK_DIR"
+    rm -f "$tmp"
+    export PATH="$FLUTTER_SDK_DIR/bin:$PATH"
+    command -v flutter &>/dev/null || die "Flutter SDK installation appears to have failed."
+    flutter config --no-analytics &>/dev/null || true
+    flutter precache --web &>/dev/null || true
+    success "Installed Flutter $(flutter --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)"
 }
 
 # ensure_protoc <min-major-version>

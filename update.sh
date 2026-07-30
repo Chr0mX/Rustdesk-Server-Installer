@@ -17,6 +17,8 @@
 #       --check-only        Only report whether updates are available
 #       --force             Reinstall even if already on the latest version
 #       --skip-api          Only update hbbs/hbbr; leave rustdesk-api/web alone
+#       --skip-engine       Leave the Flutter web engine (webclient-dev's
+#                             resources/admin/engine/) alone
 #       --hbbs-owner <owner>  Override the hbbs/hbbr release source
 #       --hbbs-repo <repo>
 #       --server-branch <branch>  Branch of hbbs-owner/hbbs-repo's source
@@ -29,6 +31,9 @@
 #       --web-owner <owner>   Override the rustdesk-api-web source
 #       --web-repo <repo>
 #       --web-branch <branch>
+#       --flutter-owner <owner>  Override the Flutter web engine source
+#       --flutter-repo <repo>    (Chr0mX/rustdesk's flutter/ subdirectory)
+#       --flutter-branch <branch>
 #       --owner <owner>     Override where THIS installer's own lib.sh
 #       --repo <repo>       is fetched from, if not run from a local
 #       --branch <branch>   clone (rarely needs changing)
@@ -39,9 +44,10 @@ set -uo pipefail
 CHECK_ONLY="false"
 FORCE_UPDATE="false"
 SKIP_API="${SKIP_API:-false}"
+SKIP_ENGINE="${SKIP_ENGINE:-false}"
 
 print_usage() {
-    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//' | sed -n '2,30p'
+    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed -E 's/^# ?//' | sed -n '2,39p'
 }
 
 while [ $# -gt 0 ]; do
@@ -57,6 +63,9 @@ while [ $# -gt 0 ]; do
             ;;
         --skip-api)
             SKIP_API="true"
+            ;;
+        --skip-engine)
+            SKIP_ENGINE="true"
             ;;
         --hbbs-owner)
             HBBS_OWNER="$2"; shift
@@ -85,6 +94,15 @@ while [ $# -gt 0 ]; do
         --web-branch)
             WEB_BRANCH="$2"; shift
             ;;
+        --flutter-owner)
+            FLUTTER_ENGINE_OWNER="$2"; shift
+            ;;
+        --flutter-repo)
+            FLUTTER_ENGINE_REPO="$2"; shift
+            ;;
+        --flutter-branch)
+            FLUTTER_ENGINE_BRANCH="$2"; shift
+            ;;
         --owner)
             GITHUB_OWNER="$2"; shift
             ;;
@@ -107,9 +125,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-export NONINTERACTIVE="${NONINTERACTIVE:-false}" SKIP_API
+export NONINTERACTIVE="${NONINTERACTIVE:-false}" SKIP_API SKIP_ENGINE
 export GITHUB_OWNER GITHUB_REPO GITHUB_BRANCH
 export HBBS_OWNER HBBS_REPO SERVER_BRANCH API_OWNER API_REPO API_BRANCH WEB_OWNER WEB_REPO WEB_BRANCH
+export FLUTTER_ENGINE_OWNER FLUTTER_ENGINE_REPO FLUTTER_ENGINE_BRANCH
 
 ##################################################################################################################
 # Bootstrap lib.sh from this fork's own repository
@@ -343,13 +362,16 @@ update_api() {
     systemctl stop rustdesk-api.service 2>/dev/null
 
     info "Upgrading rustdesk-api..."
-    # Phase 2's flutter build web output (docs/WEBCLIENT_V2_REBUILD_PLAN.md)
-    # isn't produced by this script - it's a manual `flutter build web`
-    # elsewhere, copied by hand into resources/admin/engine/. Not part of
-    # any source tree this function fetches, so it'd otherwise be silently
-    # deleted by the rm -rf below on every single update.sh run. Preserve
-    # it across the resources swap the same way conf/data/runtime already
-    # are elsewhere in this script.
+    # The Flutter web engine (docs/WEBCLIENT_V2_REBUILD_PLAN.md's Phase 2)
+    # lives in resources/admin/engine/ but comes from an entirely separate
+    # source tree/build (see update_flutter_engine below, which owns it) -
+    # not part of anything this function fetches, so it'd otherwise be
+    # silently deleted by the rm -rf below on every single update.sh run
+    # that touches api/web, regardless of whether the engine itself needs
+    # rebuilding. Preserve it across the resources swap the same way
+    # conf/data/runtime already are elsewhere in this script;
+    # update_flutter_engine runs after this and decides on its own whether
+    # to replace what gets restored here with a newer build.
     local engine_backup=""
     if [ -d "$RUSTDESK_API_INSTALL_DIR/resources/admin/engine" ]; then
         engine_backup=$(mktemp -d)
@@ -385,6 +407,70 @@ update_api() {
 }
 
 update_api
+
+##################################################################################################################
+# Flutter web engine (webclient-dev's resources/admin/engine/)
+##################################################################################################################
+
+update_flutter_engine() {
+    if [ "$SKIP_ENGINE" = "true" ]; then
+        info "--skip-engine set: not checking the Flutter web engine."
+        return 0
+    fi
+    if [ ! -d "$RUSTDESK_API_INSTALL_DIR" ]; then
+        info "rustdesk-api is not installed; skipping Flutter web engine check."
+        return 0
+    fi
+
+    local installed latest
+    installed=$(read_installed_version engine)
+    latest=$(gh_branch_sha "$FLUTTER_ENGINE_OWNER" "$FLUTTER_ENGINE_REPO" "$FLUTTER_ENGINE_BRANCH") || { warn "Could not resolve ${FLUTTER_ENGINE_OWNER}/${FLUTTER_ENGINE_REPO}@${FLUTTER_ENGINE_BRANCH}; skipping Flutter web engine update check."; return 0; }
+
+    info "Flutter web engine installed commit: ${installed:-unknown}, latest: $latest"
+
+    if [ "$CHECK_ONLY" = "true" ]; then
+        if [ "$installed" = "$latest" ]; then
+            success "Flutter web engine already up to date."
+        else
+            info "Flutter web engine update available."
+        fi
+        return 0
+    fi
+
+    if [ "$installed" = "$latest" ] && [ "$FORCE_UPDATE" != "true" ]; then
+        success "Flutter web engine already up to date."
+        return 0
+    fi
+
+    local engine_dir="$RUSTDESK_API_INSTALL_DIR/resources/admin/engine"
+    local backup_dir=""
+    if [ -d "$engine_dir" ]; then
+        backup_dir=$(mktemp -d)
+        cp -a "$engine_dir" "$backup_dir/engine"
+    fi
+
+    local workdir
+    workdir=$(mktemp -d)
+
+    success "Building the Flutter web engine (${FLUTTER_ENGINE_OWNER}/${FLUTTER_ENGINE_REPO}@${FLUTTER_ENGINE_BRANCH})..."
+    if ! build_flutter_engine "$workdir" "$engine_dir"; then
+        error "Building the Flutter web engine failed; the currently installed version was left untouched."
+        if [ -n "$backup_dir" ]; then
+            rm -rf "$engine_dir"
+            cp -a "$backup_dir/engine" "$engine_dir"
+            rm -rf "$backup_dir"
+        fi
+        rm -rf "$workdir"
+        return 1
+    fi
+
+    rm -rf "$backup_dir" "$workdir"
+    write_installed_version engine "$latest"
+    success "Flutter web engine update complete."
+    UPDATED_ANYTHING="true"
+}
+
+update_flutter_engine
 
 ##################################################################################################################
 
