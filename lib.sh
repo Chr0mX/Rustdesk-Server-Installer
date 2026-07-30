@@ -1031,7 +1031,15 @@ ensure_flutter() {
     info "Installing Flutter SDK ${FLUTTER_SDK_VERSION}..."
     local tmp extract_tmp
     tmp=$(mktemp)
-    retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused \
+    # The Flutter SDK archive is a large download (roughly 1GB) - unlike
+    # this file's other curl calls (go/node/protoc, all much smaller),
+    # plain -s silence here means several minutes with zero output,
+    # easily (and, live, actually) mistaken for a hang. --progress-bar
+    # gives visible feedback instead of total silence, and --max-time
+    # caps how long a genuinely stalled connection (as opposed to just a
+    # slow one) is allowed to hang before failing, so retry can actually
+    # kick in rather than waiting forever.
+    retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fL --progress-bar --retry-connrefused --max-time 900 \
         -o "$tmp" "https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${FLUTTER_SDK_VERSION}-stable.tar.xz" \
         || die "Failed to download the Flutter SDK."
     rm -rf "$FLUTTER_SDK_DIR"
