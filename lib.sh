@@ -39,7 +39,7 @@ HBBS_REPO="${HBBS_REPO:-rustdesk-server}"
 # rustdesk-api-web's webclient protobuf bindings (see
 # generate_webclient_protobuf below) - a source-tree ref, unlike
 # HBBS_OWNER/HBBS_REPO's own use for prebuilt release binaries above.
-SERVER_BRANCH="${SERVER_BRANCH:-master}"
+SERVER_BRANCH="${SERVER_BRANCH:-forapi}"
 
 # rustdesk-api (Go backend) and rustdesk-api-web (Vue frontend): the
 # open-source admin console/API layer this installer deploys instead of
@@ -549,6 +549,33 @@ gh_branch_sha() {
     fi
 }
 
+# resolve_submodule <owner> <repo> <ref> <path>
+# Resolves a git submodule to "<owner> <repo> <sha>" (space-separated) via
+# the Contents API, which - unlike fetch_source_tarball's GitHub tarball
+# API - actually reports what a submodule path points at (a tarball of the
+# *parent* repo only ever contains an empty directory there, never the
+# submodule's real content). Needed because rustdesk-server's
+# libs/hbb_common is a submodule pointing at rustdesk/hbb_common, not
+# regular tracked content of rustdesk-server itself.
+resolve_submodule() {
+    local owner="$1" repo="$2" ref="$3" path="$4"
+    local json url sha
+    json=$(_gh_curl "${GITHUB_API}/repos/${owner}/${repo}/contents/${path}?ref=${ref}" 2>/dev/null) || return 1
+    [ -n "$json" ] || return 1
+    if command -v jq &>/dev/null; then
+        url=$(echo "$json" | jq -r '.submodule_git_url // empty')
+        sha=$(echo "$json" | jq -r '.sha // empty')
+    else
+        url=$(echo "$json" | grep '"submodule_git_url"' | head -n1 | sed -E 's/.*"submodule_git_url": *"([^"]+)".*/\1/')
+        sha=$(echo "$json" | grep '"sha"' | head -n1 | sed -E 's/.*"sha": *"([^"]+)".*/\1/')
+    fi
+    [ -n "$url" ] && [ -n "$sha" ] || return 1
+    # https://github.com/<owner>/<repo>[.git] -> "<owner> <repo>"
+    local owner_repo
+    owner_repo=$(echo "$url" | sed -E 's#^https?://github\.com/##; s#\.git$##')
+    echo "${owner_repo%%/*} ${owner_repo#*/} $sha"
+}
+
 # Returns "<id> <browser_download_url>" for a given asset name if it is
 # present in RELEASE_JSON, empty otherwise. The numeric asset id is
 # required to hit the authenticated release-assets API for private repos.
@@ -902,16 +929,18 @@ ensure_protoc() {
 
 # generate_webclient_protobuf <rustdesk-api-web-workdir>
 # Generates src/webclient/connection/message.ts and rendezvous.ts inside
-# <rustdesk-api-web-workdir> via protoc + ts-proto, against
-# HBBS_OWNER/HBBS_REPO's libs/hbb_common/*.proto at SERVER_BRANCH (the same
-# fork/branch hbbs/hbbr itself is built from, by default). Must run AFTER
-# `npm install` in that workdir - it needs node_modules/.bin/protoc-gen-ts_proto,
-# which ts-proto (a package.json devDependency) provides, and BEFORE
-# `npm run build`, which needs the generated files to resolve. See
-# rustdesk-api-web's src/webclient/connection/README.md for why these two
-# specific files are generated rather than committed (matches how
-# RustDesk's own recovered v1 web client always did it - protoc output was
-# gitignored there too).
+# <rustdesk-api-web-workdir> via protoc + ts-proto, against the *.proto
+# files from libs/hbb_common - a git submodule of HBBS_OWNER/HBBS_REPO at
+# SERVER_BRANCH (default: this fork's own default branch), resolved live
+# via resolve_submodule rather than assumed, since it's not that repo's
+# own tracked content and its pin (currently rustdesk/hbb_common) moves
+# independently. Must run AFTER `npm install` in that workdir - it needs
+# node_modules/.bin/protoc-gen-ts_proto, which ts-proto (a package.json
+# devDependency) provides, and BEFORE `npm run build`, which needs the
+# generated files to resolve. See rustdesk-api-web's
+# src/webclient/connection/README.md for why these two specific files are
+# generated rather than committed (matches how RustDesk's own recovered v1
+# web client always did it - protoc output was gitignored there too).
 generate_webclient_protobuf() {
     local web_workdir="$1"
     ensure_protoc 3
@@ -919,13 +948,25 @@ generate_webclient_protobuf() {
     local plugin="$web_workdir/node_modules/.bin/protoc-gen-ts_proto"
     [ -x "$plugin" ] || die "protoc-gen-ts_proto not found at $plugin - run npm install in $web_workdir first."
 
-    local server_dir
-    server_dir=$(mktemp -d)
-    info "Fetching ${HBBS_OWNER}/${HBBS_REPO}@${SERVER_BRANCH} for libs/hbb_common/*.proto..."
-    fetch_source_tarball "$HBBS_OWNER" "$HBBS_REPO" "$SERVER_BRANCH" "$server_dir" \
-        || die "Could not fetch ${HBBS_OWNER}/${HBBS_REPO}@${SERVER_BRANCH} to generate webclient protobuf bindings."
-    local protos_dir="$server_dir/libs/hbb_common/protos"
-    [ -d "$protos_dir" ] || die "libs/hbb_common/protos not found in ${HBBS_OWNER}/${HBBS_REPO}@${SERVER_BRANCH} - has hbb_common moved?"
+    # libs/hbb_common is a git submodule of HBBS_OWNER/HBBS_REPO (pointing
+    # at rustdesk/hbb_common as of this writing, but resolved live rather
+    # than hardcoded - it's not this fork's own content, and its pin
+    # moves independently). fetch_source_tarball on HBBS_OWNER/HBBS_REPO
+    # itself would silently produce an empty directory here - GitHub's
+    # tarball API never includes submodule content, only the gitlink.
+    local resolved
+    resolved=$(resolve_submodule "$HBBS_OWNER" "$HBBS_REPO" "$SERVER_BRANCH" "libs/hbb_common") \
+        || die "Could not resolve libs/hbb_common as a submodule of ${HBBS_OWNER}/${HBBS_REPO}@${SERVER_BRANCH} - has its layout changed?"
+    local hbb_owner hbb_repo hbb_sha
+    read -r hbb_owner hbb_repo hbb_sha <<< "$resolved"
+
+    local hbb_dir
+    hbb_dir=$(mktemp -d)
+    info "Fetching ${hbb_owner}/${hbb_repo}@${hbb_sha} (libs/hbb_common of ${HBBS_OWNER}/${HBBS_REPO}@${SERVER_BRANCH}) for its *.proto files..."
+    fetch_source_tarball "$hbb_owner" "$hbb_repo" "$hbb_sha" "$hbb_dir" \
+        || die "Could not fetch ${hbb_owner}/${hbb_repo}@${hbb_sha} to generate webclient protobuf bindings."
+    local protos_dir="$hbb_dir/protos"
+    [ -d "$protos_dir" ] || die "protos/ not found in ${hbb_owner}/${hbb_repo}@${hbb_sha} - has hbb_common's layout moved?"
 
     info "Generating webclient protobuf bindings..."
     (
@@ -937,8 +978,8 @@ generate_webclient_protobuf() {
             -I "$protos_dir" \
             --ts_proto_out=./src/webclient/connection/ \
             rendezvous.proto message.proto
-    ) || { rm -rf "$server_dir"; die "protoc failed generating webclient protobuf bindings."; }
-    rm -rf "$server_dir"
+    ) || { rm -rf "$hbb_dir"; die "protoc failed generating webclient protobuf bindings."; }
+    rm -rf "$hbb_dir"
     success "Generated src/webclient/connection/message.ts and rendezvous.ts."
 }
 

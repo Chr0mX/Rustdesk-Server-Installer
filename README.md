@@ -132,7 +132,7 @@ All flags are also available as environment variables:
 |---------------------|-----------------|--------------------------------|---------|
 | `HBBS_OWNER`         | `--hbbs-owner`  | `Chr0mX`                        | hbbs/hbbr release source |
 | `HBBS_REPO`          | `--hbbs-repo`   | `rustdesk-server`               | |
-| `SERVER_BRANCH`      | `--server-branch` | `master`                     | Branch of `HBBS_OWNER`/`HBBS_REPO`'s source tree to pull `libs/hbb_common/*.proto` from when generating rustdesk-api-web's webclient protobuf bindings |
+| `SERVER_BRANCH`      | `--server-branch` | `forapi`                     | Branch of `HBBS_OWNER`/`HBBS_REPO`'s source tree to pull `libs/hbb_common/*.proto` from when generating rustdesk-api-web's webclient protobuf bindings |
 | `API_OWNER`          | `--api-owner`   | `Chr0mX`                       | rustdesk-api source |
 | `API_REPO`           | `--api-repo`    | `rustdesk-api`                  | |
 | `API_BRANCH`         | `--api-branch`  | `master`                        | |
