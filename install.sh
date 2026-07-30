@@ -42,7 +42,7 @@
 #       --server-branch <branch>  Branch of hbbs-owner/hbbs-repo's source
 #                             tree to pull libs/hbb_common/*.proto from
 #                             when generating rustdesk-api-web's webclient
-#                             protobuf bindings (default: master)
+#                             protobuf bindings (default: forapi)
 #       --api-owner <owner>   Override the rustdesk-api source
 #       --api-repo <repo>
 #       --api-branch <branch>
