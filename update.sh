@@ -19,6 +19,10 @@
 #       --skip-api          Only update hbbs/hbbr; leave rustdesk-api/web alone
 #       --hbbs-owner <owner>  Override the hbbs/hbbr release source
 #       --hbbs-repo <repo>
+#       --server-branch <branch>  Branch of hbbs-owner/hbbs-repo's source
+#                             tree to pull libs/hbb_common/*.proto from
+#                             when generating rustdesk-api-web's webclient
+#                             protobuf bindings (default: master)
 #       --api-owner <owner>   Override the rustdesk-api source
 #       --api-repo <repo>
 #       --api-branch <branch>
@@ -59,6 +63,9 @@ while [ $# -gt 0 ]; do
             ;;
         --hbbs-repo)
             HBBS_REPO="$2"; shift
+            ;;
+        --server-branch)
+            SERVER_BRANCH="$2"; shift
             ;;
         --api-owner)
             API_OWNER="$2"; shift
@@ -102,7 +109,7 @@ done
 
 export NONINTERACTIVE="${NONINTERACTIVE:-false}" SKIP_API
 export GITHUB_OWNER GITHUB_REPO GITHUB_BRANCH
-export HBBS_OWNER HBBS_REPO API_OWNER API_REPO API_BRANCH WEB_OWNER WEB_REPO WEB_BRANCH
+export HBBS_OWNER HBBS_REPO SERVER_BRANCH API_OWNER API_REPO API_BRANCH WEB_OWNER WEB_REPO WEB_BRANCH
 
 ##################################################################################################################
 # Bootstrap lib.sh from this fork's own repository
@@ -327,7 +334,7 @@ update_api() {
         rm -rf "$backup_dir" "$workdir"
         die "Could not fetch rustdesk-api-web source from ${WEB_OWNER}/${WEB_REPO}@${WEB_BRANCH}."
     fi
-    if ! ( cd "$workdir/rustdesk-api-web" && npm install && npm run build ); then
+    if ! ( cd "$workdir/rustdesk-api-web" && npm install && generate_webclient_protobuf "$workdir/rustdesk-api-web" && npm run build ); then
         rm -rf "$backup_dir" "$workdir"
         die "Building rustdesk-api-web failed; the currently installed version was left untouched."
     fi

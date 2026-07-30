@@ -35,6 +35,11 @@ GITHUB_RAW_HOST="${GITHUB_RAW_HOST:-https://raw.githubusercontent.com}"
 # install path can add on its own).
 HBBS_OWNER="${HBBS_OWNER:-Chr0mX}"
 HBBS_REPO="${HBBS_REPO:-rustdesk-server}"
+# Branch of the above to pull libs/hbb_common/*.proto from when generating
+# rustdesk-api-web's webclient protobuf bindings (see
+# generate_webclient_protobuf below) - a source-tree ref, unlike
+# HBBS_OWNER/HBBS_REPO's own use for prebuilt release binaries above.
+SERVER_BRANCH="${SERVER_BRANCH:-master}"
 
 # rustdesk-api (Go backend) and rustdesk-api-web (Vue frontend): the
 # open-source admin console/API layer this installer deploys instead of
@@ -441,6 +446,16 @@ node_arch_alias() {
     esac
 }
 
+# protoc_arch_alias: naming used by protocolbuffers/protobuf's GitHub
+# release assets, for ensure_protoc. No official armv7 build exists.
+protoc_arch_alias() {
+    case "$ARCH_ALIAS" in
+        amd64) echo "x86_64" ;;
+        arm64) echo "aarch_64" ;;
+        *) echo "" ;;
+    esac
+}
+
 ############################################################
 # Networking helpers
 ############################################################
@@ -837,6 +852,94 @@ ensure_node() {
     export PATH="/usr/local/lib/nodejs/bin:$PATH"
     command -v node &>/dev/null || die "Node.js installation appears to have failed."
     success "Installed Node.js $(node -v), npm $(npm -v)"
+}
+
+# ensure_protoc <min-major-version>
+# Ensures protoc (the Protocol Buffers compiler) is on PATH, installing a
+# pinned release from GitHub if missing or older than required. Needed by
+# generate_webclient_protobuf below - rustdesk-api-web's webclient
+# connection layer (src/webclient/connection) depends on protobuf bindings
+# generated at build time, the same way the RustDesk client's own web
+# build always has (see rustdesk-api-web's connection/README.md).
+PROTOC_FALLBACK_VERSION="${PROTOC_FALLBACK_VERSION:-29.3}"
+ensure_protoc() {
+    local min_major="${1:-3}"
+    if command -v protoc &>/dev/null; then
+        local ver major
+        ver=$(protoc --version | awk '{print $2}')
+        major=$(echo "$ver" | cut -d. -f1)
+        if [ -n "$major" ] && [ "$major" -ge "$min_major" ] 2>/dev/null; then
+            info "Using existing protoc: $ver"
+            return 0
+        fi
+        warn "Installed protoc ($ver) is older than required (${min_major}+); installing ${PROTOC_FALLBACK_VERSION} instead."
+    fi
+
+    local protocarch
+    protocarch=$(protoc_arch_alias)
+    [ -n "$protocarch" ] || die "No protoc build available for architecture $ARCH."
+
+    info "Installing protoc ${PROTOC_FALLBACK_VERSION}..."
+    local tmp extract_dir bin_path
+    tmp=$(mktemp --suffix=.zip)
+    retry "$DOWNLOAD_RETRIES" "$DOWNLOAD_RETRY_DELAY" -- curl -fsSL --retry-connrefused \
+        -o "$tmp" "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_FALLBACK_VERSION}/protoc-${PROTOC_FALLBACK_VERSION}-linux-${protocarch}.zip" \
+        || die "Failed to download protoc."
+    extract_dir=$(mktemp -d)
+    extract_archive "$tmp" "$extract_dir"
+    rm -f "$tmp"
+    bin_path=$(find_binary "$extract_dir" protoc)
+    [ -n "$bin_path" ] || die "protoc binary not found in downloaded archive."
+    mkdir -p /usr/local/bin /usr/local/include
+    cp "$bin_path" /usr/local/bin/protoc
+    chmod +x /usr/local/bin/protoc
+    [ -d "$extract_dir/include" ] && cp -r "$extract_dir/include/." /usr/local/include/
+    rm -rf "$extract_dir"
+    export PATH="/usr/local/bin:$PATH"
+    command -v protoc &>/dev/null || die "protoc installation appears to have failed."
+    success "Installed protoc $(protoc --version | awk '{print $2}')"
+}
+
+# generate_webclient_protobuf <rustdesk-api-web-workdir>
+# Generates src/webclient/connection/message.ts and rendezvous.ts inside
+# <rustdesk-api-web-workdir> via protoc + ts-proto, against
+# HBBS_OWNER/HBBS_REPO's libs/hbb_common/*.proto at SERVER_BRANCH (the same
+# fork/branch hbbs/hbbr itself is built from, by default). Must run AFTER
+# `npm install` in that workdir - it needs node_modules/.bin/protoc-gen-ts_proto,
+# which ts-proto (a package.json devDependency) provides, and BEFORE
+# `npm run build`, which needs the generated files to resolve. See
+# rustdesk-api-web's src/webclient/connection/README.md for why these two
+# specific files are generated rather than committed (matches how
+# RustDesk's own recovered v1 web client always did it - protoc output was
+# gitignored there too).
+generate_webclient_protobuf() {
+    local web_workdir="$1"
+    ensure_protoc 3
+
+    local plugin="$web_workdir/node_modules/.bin/protoc-gen-ts_proto"
+    [ -x "$plugin" ] || die "protoc-gen-ts_proto not found at $plugin - run npm install in $web_workdir first."
+
+    local server_dir
+    server_dir=$(mktemp -d)
+    info "Fetching ${HBBS_OWNER}/${HBBS_REPO}@${SERVER_BRANCH} for libs/hbb_common/*.proto..."
+    fetch_source_tarball "$HBBS_OWNER" "$HBBS_REPO" "$SERVER_BRANCH" "$server_dir" \
+        || die "Could not fetch ${HBBS_OWNER}/${HBBS_REPO}@${SERVER_BRANCH} to generate webclient protobuf bindings."
+    local protos_dir="$server_dir/libs/hbb_common/protos"
+    [ -d "$protos_dir" ] || die "libs/hbb_common/protos not found in ${HBBS_OWNER}/${HBBS_REPO}@${SERVER_BRANCH} - has hbb_common moved?"
+
+    info "Generating webclient protobuf bindings..."
+    (
+        cd "$web_workdir" || exit 1
+        protoc \
+            --ts_proto_opt=esModuleInterop=true \
+            --ts_proto_opt=snakeToCamel=false \
+            --plugin="protoc-gen-ts_proto=$plugin" \
+            -I "$protos_dir" \
+            --ts_proto_out=./src/webclient/connection/ \
+            rendezvous.proto message.proto
+    ) || { rm -rf "$server_dir"; die "protoc failed generating webclient protobuf bindings."; }
+    rm -rf "$server_dir"
+    success "Generated src/webclient/connection/message.ts and rendezvous.ts."
 }
 
 ############################################################
