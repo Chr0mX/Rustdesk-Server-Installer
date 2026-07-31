@@ -658,6 +658,7 @@ else
         if [ "$ENGINE_NEEDS_BUILD" = "true" ]; then
             success "Building the Flutter web engine (${FLUTTER_ENGINE_OWNER}/${FLUTTER_ENGINE_REPO}@${FLUTTER_ENGINE_BRANCH})..."
             build_flutter_engine "$API_WORKDIR/flutter-engine" "$API_WORKDIR/rustdesk-api/release/resources/admin/engine" \
+                "$API_WORKDIR/rustdesk-api/resources/web" \
                 || die "Building the Flutter web engine failed."
         fi
 
