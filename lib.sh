@@ -897,13 +897,14 @@ fetch_source_subdir_sparse() {
 # 2/3), which rustdesk-api-web's own build (generate_webclient_protobuf,
 # npm run build) doesn't produce - it's an entirely separate repo/SDK.
 #
-# Also copies ffmpeg.js/ffmpeg-core.js/ffmpeg-core.wasm from
-# <ffmpeg-assets-dir> (the legacy bundle's own resources/web/ - rustdesk-api
-# ships these unconditionally, regardless of whether the legacy webclient
-# itself is admin-enabled) into <dest-dir>, alongside main.dart.js.
-# rustdesk-api-web's own curConn.js (videoDecoder.js) needs these at
-# runtime to decode incoming video frames - Phase 1 decided to reuse this
-# exact prebuilt ffmpeg-core.wasm rather than rebuild an FFmpeg-to-WASM
+# Also copies ffmpeg.js/ffmpeg-core.js/ffmpeg-core.wasm and libopus.js/
+# libopus.wasm from <ffmpeg-assets-dir> (the legacy bundle's own
+# resources/web/ - rustdesk-api ships these unconditionally, regardless of
+# whether the legacy webclient itself is admin-enabled) into <dest-dir>,
+# alongside main.dart.js. rustdesk-api-web's own curConn.js
+# (videoDecoder.js/audioDecoder.js) needs these at runtime to decode
+# incoming video frames and audio - Phase 1 decided to reuse these exact
+# prebuilt WASM binaries rather than rebuild an FFmpeg/Opus-to-WASM
 # toolchain from source (well outside this project's scope; see the plan
 # doc's Phase 1 findings). Engine.vue loads them with relative paths
 # ("./ffmpeg.js" etc., resolved against the <base href> it sets to this
@@ -949,9 +950,9 @@ build_flutter_engine() {
     fi
 
     local f
-    for f in ffmpeg.js ffmpeg-core.js ffmpeg-core.wasm; do
+    for f in ffmpeg.js ffmpeg-core.js ffmpeg-core.wasm libopus.js libopus.wasm; do
         [ -f "$ffmpeg_assets_dir/$f" ] || {
-            error "$f not found in $ffmpeg_assets_dir - is rustdesk-api's resources/web/ present? Video decode would silently fail (black screen on connect) without it."
+            error "$f not found in $ffmpeg_assets_dir - is rustdesk-api's resources/web/ present? Video/audio decode would silently fail (black screen or no sound on connect) without it."
             return 1
         }
     done
@@ -959,7 +960,8 @@ build_flutter_engine() {
     mkdir -p "$(dirname "$dest_dir")"
     rm -rf "$dest_dir"
     cp -ar "$workdir/flutter/build/web" "$dest_dir"
-    cp -a "$ffmpeg_assets_dir/ffmpeg.js" "$ffmpeg_assets_dir/ffmpeg-core.js" "$ffmpeg_assets_dir/ffmpeg-core.wasm" "$dest_dir/"
+    cp -a "$ffmpeg_assets_dir/ffmpeg.js" "$ffmpeg_assets_dir/ffmpeg-core.js" "$ffmpeg_assets_dir/ffmpeg-core.wasm" \
+        "$ffmpeg_assets_dir/libopus.js" "$ffmpeg_assets_dir/libopus.wasm" "$dest_dir/"
 }
 
 # ensure_go <min-minor-version>
