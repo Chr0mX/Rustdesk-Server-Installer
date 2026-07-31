@@ -71,10 +71,11 @@ FLUTTER_ENGINE_SUBDIR="${FLUTTER_ENGINE_SUBDIR:-flutter}"
 # harmless either way since Engine.vue resolves assets via a runtime
 # document.baseURI <base> tag instead (see its own comments), but kept
 # accurate/consistent with how it's actually served. Matches
-# rustdesk-api-web's own VITE_ENGINE_BASE_URL (.env.production) for the
-# current /webclient-dev/ preview route - update both together if/when
-# Phase 6 (Cutover) repoints the webclient at /webclient/ instead.
-ENGINE_BASE_HREF="${ENGINE_BASE_HREF:-/webclient-dev/engine/}"
+# rustdesk-api-web's own VITE_ENGINE_BASE_URL (.env.production) and
+# rustdesk-api's router.go, which now serve the Vue webclient at the
+# primary /webclient/ route (Phase 6 cutover) - update all three together
+# if this ever moves again.
+ENGINE_BASE_HREF="${ENGINE_BASE_HREF:-/webclient/engine/}"
 
 # Optional token used for all GitHub API/download requests. Not needed
 # against a public repository beyond raising the API rate limit
@@ -945,6 +946,26 @@ build_flutter_engine() {
 # is missing or too old. rustdesk-api needs a recent Go (see its go.mod)
 # for its use of go-sqlite3 (CGO) and other dependencies.
 GO_FALLBACK_VERSION="${GO_FALLBACK_VERSION:-go1.23.4}"
+# link_into_path <bin-dir> <name> [<name> ...]
+# Symlinks the named binaries from <bin-dir> into /usr/local/bin, which is
+# on PATH by default for root on essentially every Linux distribution -
+# unlike the `export PATH=...` ensure_go/ensure_node/ensure_flutter each
+# do for their own currently-running process, which only lasts for the
+# current script invocation. Without this, install.sh/update.sh's own
+# toolchain installs were invisible to themselves on the next run (each
+# run is a fresh bash process with no memory of an earlier PATH export),
+# so every ensure_* call re-downloaded and reinstalled from scratch every
+# single time regardless of whether anything had actually changed -
+# confirmed live, and especially painful for ensure_flutter's ~1GB
+# download.
+link_into_path() {
+    local bin_dir="$1"; shift
+    local name
+    for name in "$@"; do
+        [ -x "$bin_dir/$name" ] && ln -sf "$bin_dir/$name" "/usr/local/bin/$name"
+    done
+}
+
 ensure_go() {
     local min_minor="${1:-23}"
     if command -v go &>/dev/null; then
@@ -972,6 +993,7 @@ ensure_go() {
     tar -C /usr/local -xzf "$tmp"
     rm -f "$tmp"
     export PATH="/usr/local/go/bin:$PATH"
+    link_into_path /usr/local/go/bin go gofmt
     command -v go &>/dev/null || die "Go installation appears to have failed."
     success "Installed $(go version)"
 }
@@ -1010,6 +1032,7 @@ ensure_node() {
     tar -xJf "$tmp" -C /usr/local/lib/nodejs --strip-components=1
     rm -f "$tmp"
     export PATH="/usr/local/lib/nodejs/bin:$PATH"
+    link_into_path /usr/local/lib/nodejs/bin node npm npx
     command -v node &>/dev/null || die "Node.js installation appears to have failed."
     success "Installed Node.js $(node -v), npm $(npm -v)"
 }
@@ -1103,6 +1126,7 @@ ensure_flutter() {
     # doesn't apply here.
     git config --global --add safe.directory "$FLUTTER_SDK_DIR"
     export PATH="$FLUTTER_SDK_DIR/bin:$PATH"
+    link_into_path "$FLUTTER_SDK_DIR/bin" flutter dart
     command -v flutter &>/dev/null || die "Flutter SDK installation appears to have failed."
     # Matches the manual install steps verified working on this project's
     # own production server: `flutter config --enable-web`, nothing else -
