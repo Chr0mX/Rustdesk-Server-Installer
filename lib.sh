@@ -888,7 +888,7 @@ fetch_source_subdir_sparse() {
     rm -rf "$tmp_clone"
 }
 
-# build_flutter_engine <workdir> <dest-dir>
+# build_flutter_engine <workdir> <dest-dir> <ffmpeg-assets-dir>
 # Fetches Chr0mX/rustdesk's recovered flutter/ subtree (sparse - see
 # fetch_source_subdir_sparse above) at FLUTTER_ENGINE_BRANCH, builds it
 # with `flutter build web`, and installs the result into <dest-dir>
@@ -896,6 +896,19 @@ fetch_source_subdir_sparse() {
 # resources/admin/engine/ (see docs/WEBCLIENT_V2_REBUILD_PLAN.md's Phase
 # 2/3), which rustdesk-api-web's own build (generate_webclient_protobuf,
 # npm run build) doesn't produce - it's an entirely separate repo/SDK.
+#
+# Also copies ffmpeg.js/ffmpeg-core.js/ffmpeg-core.wasm from
+# <ffmpeg-assets-dir> (the legacy bundle's own resources/web/ - rustdesk-api
+# ships these unconditionally, regardless of whether the legacy webclient
+# itself is admin-enabled) into <dest-dir>, alongside main.dart.js.
+# rustdesk-api-web's own curConn.js (videoDecoder.js) needs these at
+# runtime to decode incoming video frames - Phase 1 decided to reuse this
+# exact prebuilt ffmpeg-core.wasm rather than rebuild an FFmpeg-to-WASM
+# toolchain from source (well outside this project's scope; see the plan
+# doc's Phase 1 findings). Engine.vue loads them with relative paths
+# ("./ffmpeg.js" etc., resolved against the <base href> it sets to this
+# same directory before loading main.dart.js), so they have to live
+# side-by-side with the engine build output, not anywhere else.
 #
 # Note: unlike some of this file's other build helpers, failures here
 # return 1 rather than calling die() directly (ensure_flutter is the one
@@ -905,7 +918,7 @@ fetch_source_subdir_sparse() {
 # have a previous engine build worth rolling back to on failure, so they
 # need the chance to do that before the script exits.
 build_flutter_engine() {
-    local workdir="$1" dest_dir="$2"
+    local workdir="$1" dest_dir="$2" ffmpeg_assets_dir="$3"
 
     ensure_flutter
 
@@ -935,9 +948,18 @@ build_flutter_engine() {
         return 1
     fi
 
+    local f
+    for f in ffmpeg.js ffmpeg-core.js ffmpeg-core.wasm; do
+        [ -f "$ffmpeg_assets_dir/$f" ] || {
+            error "$f not found in $ffmpeg_assets_dir - is rustdesk-api's resources/web/ present? Video decode would silently fail (black screen on connect) without it."
+            return 1
+        }
+    done
+
     mkdir -p "$(dirname "$dest_dir")"
     rm -rf "$dest_dir"
     cp -ar "$workdir/flutter/build/web" "$dest_dir"
+    cp -a "$ffmpeg_assets_dir/ffmpeg.js" "$ffmpeg_assets_dir/ffmpeg-core.js" "$ffmpeg_assets_dir/ffmpeg-core.wasm" "$dest_dir/"
 }
 
 # ensure_go <min-minor-version>

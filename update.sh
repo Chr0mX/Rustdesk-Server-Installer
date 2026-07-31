@@ -452,8 +452,13 @@ update_flutter_engine() {
     local workdir
     workdir=$(mktemp -d)
 
+    if [ ! -f "$RUSTDESK_API_INSTALL_DIR/resources/web/ffmpeg.js" ]; then
+        rm -rf "$backup_dir" "$workdir"
+        die "$RUSTDESK_API_INSTALL_DIR/resources/web/ffmpeg.js not found - rustdesk-api needs to be installed/updated (not with --skip-api) before the Flutter web engine can be built."
+    fi
+
     success "Building the Flutter web engine (${FLUTTER_ENGINE_OWNER}/${FLUTTER_ENGINE_REPO}@${FLUTTER_ENGINE_BRANCH})..."
-    if ! build_flutter_engine "$workdir" "$engine_dir"; then
+    if ! build_flutter_engine "$workdir" "$engine_dir" "$RUSTDESK_API_INSTALL_DIR/resources/web"; then
         error "Building the Flutter web engine failed; the currently installed version was left untouched."
         if [ -n "$backup_dir" ]; then
             rm -rf "$engine_dir"
